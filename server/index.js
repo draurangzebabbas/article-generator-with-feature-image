@@ -243,10 +243,17 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       }
     } = req.body;
     
-    if (!mainKeyword || !top10Articles || !relatedKeywords) {
+    if (!mainKeyword) {
       return res.status(400).json({ 
         error: 'Invalid request', 
-        message: 'mainKeyword, top10Articles, and relatedKeywords are required' 
+        message: 'mainKeyword is required' 
+      });
+    }
+
+    if (!competitorResearch && (!top10Articles || !relatedKeywords)) {
+      return res.status(400).json({ 
+        error: 'Invalid request', 
+        message: 'top10Articles and relatedKeywords are required when competitorResearch is false' 
       });
     }
 
