@@ -228,6 +228,9 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       imagePrompt = '',
       imageWidth = 1200,
       imageHeight = 630,
+      createTool = true,
+      competitorResearch = false,
+      imageCount = 1,
       models = {
         metaGenerator: 'deepseek/deepseek-chat-v3-0324:free',
         toolGenerator: 'qwen/qwen-2.5-coder-32b-instruct:free',
@@ -258,6 +261,95 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const heightNum = Number.isFinite(Number(imageHeight)) ? Number(imageHeight) : 630;
     const finalImageWidth = widthNum > 0 ? widthNum : 1200;
     const finalImageHeight = heightNum > 0 ? heightNum : 630;
+    const sanitizedCreateTool = Boolean(createTool);
+    const sanitizedCompetitorResearch = Boolean(competitorResearch);
+    const sanitizedImageCountRaw = Number.isFinite(Number(imageCount)) ? Number(imageCount) : 1;
+    const sanitizedImageCount = Math.min(Math.max(1, sanitizedImageCountRaw), 5);
+
+    // Optionally fetch SERP data (Apify) to build competitive context
+    let top10ForMeta = String(top10Articles || '').replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
+    let relatedForMeta = String(relatedKeywords || '').replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
+
+    if (sanitizedCompetitorResearch) {
+      try {
+        // Get user's Apify keys
+        let { data: apifyKeys } = await supabase
+          .from('api_keys')
+          .select('*')
+          .eq('user_id', req.user.id)
+          .eq('provider', 'apify')
+          .in('status', ['active', 'rate_limited']);
+
+        if (!apifyKeys || apifyKeys.length === 0) {
+          throw new Error('No Apify API keys available for SERP research');
+        }
+
+        const apifyKey = apifyKeys[0];
+
+        // Start SERP actor
+        const startRes = await fetch('https://api.apify.com/v2/acts/scraperlink~google-search-results-serp-scraper/runs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apifyKey.api_key}`
+          },
+          body: JSON.stringify({ country: 'US', keyword: sanitizedMainKeyword, page: 1 })
+        });
+        if (!startRes.ok) {
+          const t = await startRes.text();
+          throw new Error(`SERP actor start failed: ${startRes.status} ${t}`);
+        }
+        const run = await startRes.json();
+        const runId = run.data?.id;
+        if (!runId) throw new Error('No run id from SERP actor');
+
+        // Poll status (max 60 attempts ~5min)
+        let attempts = 0;
+        while (attempts < 60) {
+          await new Promise(r => setTimeout(r, 5000));
+          attempts++;
+          const stRes = await fetch(`https://api.apify.com/v2/acts/scraperlink~google-search-results-serp-scraper/runs/${runId}`, {
+            headers: { 'Authorization': `Bearer ${apifyKey.api_key}` }
+          });
+          if (!stRes.ok) continue;
+          const st = await stRes.json();
+          const status = st.data?.status;
+          if (status === 'SUCCEEDED') break;
+          if (status === 'FAILED') throw new Error('SERP actor failed');
+        }
+
+        // Fetch dataset
+        const dsRes = await fetch(`https://api.apify.com/v2/acts/scraperlink~google-search-results-serp-scraper/runs/${runId}`, {
+          headers: { 'Authorization': `Bearer ${apifyKey.api_key}` }
+        });
+        const ds = await dsRes.json();
+        const datasetId = ds.data?.defaultDatasetId;
+        if (!datasetId) throw new Error('No dataset id from SERP actor');
+
+        // Wait a bit and then get items
+        await new Promise(r => setTimeout(r, 10000));
+        const itemsRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items`, {
+          headers: { 'Authorization': `Bearer ${apifyKey.api_key}` }
+        });
+        if (!itemsRes.ok) throw new Error(`SERP dataset fetch failed: ${itemsRes.status}`);
+        const items = await itemsRes.json();
+        const first = Array.isArray(items) && items.length > 0 ? items[0] : null;
+        const results = first?.results || [];
+        const relatedKw = first?.related_keywords?.keywords || [];
+
+        const topLines = results.slice(0, 10).map((r) => {
+          const t = (r.title || '').toString().trim();
+          const d = (r.description || '').toString().trim();
+          return `${t} — ${d}`;
+        }).filter(Boolean);
+        top10ForMeta = topLines.join('\n');
+        if (relatedKw.length > 0) {
+          relatedForMeta = relatedKw.join(', ');
+        }
+      } catch (e) {
+        console.log('⚠️ SERP research failed, falling back to provided inputs:', e?.message);
+      }
+    }
 
     // Log the request
     await supabase.from('analysis_logs').insert({
@@ -460,15 +552,15 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const metaGeneratorMessages = [
       {
         role: "system",
-        content: "You are an expert SEO copywriter trained to create high-performing, keyword-optimized content for websites. Your task is to analyze the given main keyword, top 10 competing articles, and related keywords — then return an SEO-optimized **title** and **excerpt** (meta description) that will improve click-through rate (CTR), topical relevance, and keyword targeting.\n\n### Your goals:\n- Outperform the top 10 competitors in search\n- Maximize relevance for both search engines and users\n- Match Google's SERP formatting best practices\n\n### Strongly Follow These Rules:\n\n1. **SEO Title**\n   - Must include the main keyword, preferably at the beginning\n   - Strictly limited to **less than 60 characters**\n   - Must be compelling and CTR-optimized\n   - Use **Title Case** (Capitalize Major Words)\n   - Should include a unique differentiator (like 'Free', 'Best', 'Instant', etc.)\n   - Avoid clickbait, vague terms, or filler words\n\n2. **SEO Meta Description / Excerpt**\n   - Strictly between **150 and 160 characters**\n   - Must clearly explain what the user will get\n   - Must include the **main keyword** and **1–2 related keywords** naturally\n   - Focus on clarity, value, and high-CTR language\n   - Use an informative and benefit-driven tone (no hype or fluff)\n\n3. **Do not** include filler words, generic content, or overly promotional language\n\n---\n\n### Semantic Keyword Rules (Append This Part to Enhance Topical Authority):\n\n4. **Semantic Keyword Identification**\n- These are the main topics your content should include when you're optimizing for the keyword\n   \n \n     - 'supportive': Related contextual terms, synonyms, LSI/NLP matches\n\n\n---\n\n### Headings Instructions (Append for Content Expansion and Structuring):\n\n5. **Structured H2 Headings Generation**\n   - Generate **10 to 14 unique, non-overlapping H2 headings**\n   - Divide them into **two clearly labeled sections**:\n     - `section_1`: Core Informational Topics (definitions, how-tos, key guides)\n     - `section_2`: Supporting & Secondary Topics (tips, examples,  context) (dont include faq and conclusion heading ever in any of section)\n   - All headings must be:\n     - Relevant to the main keyword and semantic context\n     - Clear, value-driven, and highly specific\n     - SEO-optimized and free from duplicate phrasing\n     - Avoid keyword stuffing or vague generalities\n   - **Strictly do not add any heading in the form of** `What is [main keyword]` **or** `How to Use [main keyword]` **as these will be covered in the main guide section of the tool**\n\n---\n\n### FAQ Generation Instructions (Append This to the End):\n\n6. **Generate 5–8 Unique FAQs**\n   - FAQs must **not** repeat or duplicate any headings or content from section\_1 or section\_2\n   - Use natural language and target common questions related to the main keyword\n   - Output only the **questions**, no formatting or wrapping\n   - Keep questions helpful, concise, and unique\n\n---\n\n### Final Output Format:\n\nReturn a valid JSON object with these exact fields:\n- title: SEO-optimized title (less than 60 characters)\n- excerpt: SEO-optimized meta description (150-160 characters)\n- semantic_keywords: object with informational, transactional_optional, and supportive arrays\n- headings: object with section_1 and section_2 arrays containing H2 headings\n- faq: array of 5-8 FAQ questions\n\nExample structure:\n{\n  'title': 'SEO-Optimized Title Here',\n  'excerpt': 'SEO-optimized meta description here between 150 and 160 characters.',\n  'semantic_keywords': {\n    'informational': ['term1', 'term2'],\n    'transactional_optional': ['term3', 'term4'],\n    'supportive': ['term5', 'term6']\n  },\n  'headings': {\n    'section_1': ['Heading 1', 'Heading 2', 'Heading 3'],\n    'section_2': ['Heading 4', 'Heading 5', 'Heading 6']\n  },\n  'faq': ['Question 1?', 'Question 2?', 'Question 3?', 'Question 4?', 'Question 5?']\n}"
+        content: "You are an expert SEO copywriter trained to create high-performing, keyword-optimized content for websites. Your task is to analyze the given main keyword, top 10 competing articles, and related keywords — then return an SEO-optimized title and excerpt (meta description) that will improve CTR, topical relevance, and keyword targeting.\n\n### Your goals:\n- Outperform the top 10 competitors in search\n- Maximize relevance for both search engines and users\n- Match Google's SERP formatting best practices\n\n### Strongly Follow These Rules:\n\n1. SEO Title\n   - Must include the main keyword, preferably at the beginning\n   - Strictly limited to less than 60 characters\n   - Must be compelling and CTR-optimized\n   - Use Title Case (Capitalize Major Words)\n   - Include a unique differentiator (like 'Free', 'Best', 'Instant', etc.)\n   - Avoid clickbait, vague terms, or filler words\n\n2. SEO Meta Description / Excerpt\n   - Strictly between 150 and 160 characters\n   - Clearly explain what the user will get\n   - Must include the main keyword and 1–2 related keywords naturally\n   - Informative and benefit-driven tone (no hype or fluff)\n\n3. Do not include filler words, generic content, or overly promotional language\n\n### Headings Instructions:\n\n4. Structured H2 Headings Generation\n   - Generate 10 to 14 unique, non-overlapping H2 headings\n   - Divide them into two clearly labeled sections:\n     - section_1: Core Informational Topics (definitions, how-tos, key guides)\n     - section_2: Supporting & Secondary Topics (tips, examples, context) (dont include faq and conclusion heading ever in any of section)\n   - All headings must be:\n     - Relevant to the main keyword and context\n     - Clear, value-driven, and highly specific\n     - SEO-optimized and free from duplicate phrasing\n     - Avoid keyword stuffing or vague generalities\n   - Strictly do not add any heading in the form of `What is [main keyword]` or `How to Use [main keyword]`\n\n### Final Output Format:\nReturn a valid JSON object with these exact fields:\n- title: SEO-optimized title (less than 60 characters)\n- excerpt: SEO-optimized meta description (150-160 characters)\n- headings: object with section_1 and section_2 arrays containing H2 headings\n- faq: array of 5-8 FAQ questions\n- feature_image_prompt: string only when image generation is requested (omit otherwise)"
       },
       {
         role: "user",
-        content: `Here is our main keyword \n"${sanitizedMainKeyword}"\n\n\nTop 10 ranking  articles\n${sanitizedTop10Articles}\n\n\nRelated Keywords\n${sanitizedRelatedKeywords}\n\n`
+        content: `Here is our main keyword \n"${sanitizedMainKeyword}"\n\n\nTop 10 ranking  articles\n${top10ForMeta}\n\n\nRelated Keywords\n${relatedForMeta}\n\n- generate_image: ${sanitizedGenerateImage}\n- desired_dimensions: { width: ${finalImageWidth}, height: ${finalImageHeight} }\n- provided_image_prompt: ${sanitizedImagePrompt || '(none)'}\n`
       },
       {
         role: "system",
-        content: "You give output in valid json just just inside {}\n\ndo not append like ```json\ndo not give invalid json\nall things should only inside {}\nnot even dot or comma outside{}"
+        content: "You give output in valid json just just inside {}\n\ndo not append like ```json\n\ndo not give invalid json\nall things should only inside {}\nnot even dot or comma outside{}"
       }
     ];
 
@@ -497,6 +589,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     // Optional: Feature image prompt generation and URL (synchronous)
     let featureImagePrompt = '';
     let featureImageUrl = '';
+    let featureImageUrls = [];
     if (sanitizedGenerateImage) {
       try {
         if (sanitizedImagePrompt) {
@@ -521,16 +614,22 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           const generated = await executeModule('Feature Image Prompt', imagePromptMessages, models.metaGenerator, 'META', { maxTokens: 300 });
           featureImagePrompt = (generated || '').trim();
         }
-        const encoded = encodeURIComponent(featureImagePrompt);
-        featureImageUrl = `https://image.pollinations.ai/prompt/${encoded}?width=${finalImageWidth}&height=${finalImageHeight}&nologo=true`;
-        console.log('🖼️ Feature image prepared');
+        // Build N image URLs with varied seed for diversity
+        for (let i = 0; i < sanitizedImageCount; i++) {
+          const seed = Math.floor(Math.random() * 1e9);
+          const encoded = encodeURIComponent(featureImagePrompt);
+          const url = `https://image.pollinations.ai/prompt/${encoded}?width=${finalImageWidth}&height=${finalImageHeight}&seed=${seed}&nologo=true`;
+          featureImageUrls.push(url);
+        }
+        featureImageUrl = featureImageUrls[0] || '';
+        console.log('🖼️ Feature image(s) prepared:', featureImageUrls.length);
       } catch (e) {
         console.log('⚠️ Feature image prompt generation failed:', e?.message);
       }
     }
 
-    // Branch A: Tool -> Validator -> Guide
-    const branchA = (async () => {
+    // Branch A: Tool -> Validator -> Guide (conditional)
+    const branchA = sanitizedCreateTool ? (async () => {
       console.log(`🚀 Starting Branch A: Tool -> Validator -> Guide`);
       
       // Tool Generator
@@ -598,7 +697,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       console.log(`✅ Guide Generator completed, guide length: ${guideResult.length} characters`);
 
       return { toolResult, validatedToolResult, guideResult };
-    })();
+    })() : Promise.resolve({ toolResult: '', validatedToolResult: '', guideResult: '' });
 
     // Branch B: Section 1 -> Section 2 (optimized)
     const branchB = (async () => {
@@ -676,9 +775,9 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
     const { section1Result, section2Result } = branchBResults;
 
     // Store results
-    results.tool_generator_result = toolResult;
-    results.validated_tool_result = validatedToolResult;
-    results.guide_generator_result = guideResult;
+    results.tool_generator_result = branchAResults.toolResult;
+    results.validated_tool_result = branchAResults.validatedToolResult;
+    results.guide_generator_result = branchAResults.guideResult;
     results.section_1_generator_result = section1Result;
     results.section_2_generator_result = section2Result;
     results.faq_generator_result = faqResult;
@@ -708,15 +807,17 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       faq_questions: metaData.faq || [],
       
       // Tool Results (sanitized)
-      tool_generator_result: toolResult ? String(toolResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
-      validated_tool_result: validatedToolResult ? String(validatedToolResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
-      guide_generator_result: guideResult ? String(guideResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
+      tool_generator_result: (branchAResults.toolResult ? String(branchAResults.toolResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : ''),
+      validated_tool_result: (branchAResults.validatedToolResult ? String(branchAResults.validatedToolResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : ''),
+      guide_generator_result: (branchAResults.guideResult ? String(branchAResults.guideResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : ''),
 
       // Feature Image (optional)
       feature_image_prompt: featureImagePrompt,
       feature_image_url: featureImageUrl,
+      feature_image_urls: featureImageUrls,
       image_width: sanitizedGenerateImage ? finalImageWidth : undefined,
       image_height: sanitizedGenerateImage ? finalImageHeight : undefined,
+      image_count: sanitizedGenerateImage ? sanitizedImageCount : undefined,
 
       // Content Results (sanitized)
       section_1_generator_result: section1Result ? String(section1Result).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
@@ -729,6 +830,10 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         section2Result ? String(section2Result).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
         faqResult ? String(faqResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : ''
       ].filter(Boolean).join('\n\n'),
+      
+      // Flags
+      create_tool: sanitizedCreateTool,
+      competitor_research: sanitizedCompetitorResearch,
       
       // Status
       status: 'completed',
