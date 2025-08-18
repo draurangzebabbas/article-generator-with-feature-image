@@ -250,13 +250,6 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       });
     }
 
-    if (!competitorResearch && (!top10Articles || !relatedKeywords)) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'top10Articles and relatedKeywords are required when competitorResearch is false' 
-      });
-    }
-
     // Sanitize inputs to prevent JSON injection and control character issues
     const sanitizedMainKeyword = String(mainKeyword).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
     const sanitizedTop10Articles = String(top10Articles).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
