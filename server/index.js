@@ -793,78 +793,29 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       status: 'pending'
     });
 
-    // Priority-based API key selection - active keys first, then failed/rate_limited if needed
+    // Use the new smart key assignment system (ONLY key rotation logic updated)
     const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1);
     
     if (!selectedKeys || selectedKeys.length === 0) {
       return res.status(400).json({ error: 'No OpenRouter API keys found' });
     }
 
-    // 🚀 ENTERPRISE-GRADE: Use the new fail-proof parallel processing system
-    console.log(`🚀 Starting enterprise-grade article generation`);
+    // Test the selected key and update its status
+    const testResult = await testAndUpdateApiKey(supabase, selectedKeys[0]);
     
-    // Create the article generation operation
-    const articleGenerationOperation = async (apiKey) => {
-      console.log(`🔄 Executing article generation with key: ${apiKey.key_name}`);
-      
-      // Generate the article using the provided API key
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey.api_key}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://your-app.com',
-          'X-Title': 'Article Generator'
-        },
-        body: JSON.stringify({
-          model: 'anthropic/claude-3.5-sonnet',
-          messages: [
-            {
-              role: 'system',
-              content: `You are an expert content writer. Generate a comprehensive, engaging article based on the user's requirements.`
-            },
-            {
-              role: 'user',
-              content: `Generate an article with the following details:
-                - Keyword: ${sanitizedMainKeyword}
-                - Target Audience: ${formData.targetAudience}
-                - Article Type: ${formData.articleType}
-                - Tone: ${formData.tone}
-                - Word Count: ${formData.wordCount}
-                - Additional Requirements: ${formData.additionalRequirements}
-                
-                Please provide a well-structured article with proper headings, engaging content, and actionable insights.`
-            }
-          ],
-          max_tokens: 4000,
-          temperature: 0.7
-        })
+    if (!testResult.success) {
+      return res.status(500).json({ 
+        error: 'Selected API key failed', 
+        key_name: testResult.key.key_name,
+        status: testResult.key.status
       });
+    }
 
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-      }
+    const currentKey = testResult.key;
 
-      const data = await response.json();
-      return data.choices[0].message.content;
-    };
-
-    // Execute with fail-proof retry system
-    const mainArticleContent = await executeOperationWithRetry(supabase, req.user.id, 'openrouter', articleGenerationOperation);
-    
-    console.log(`✅ Article generation completed successfully with enterprise-grade system`);
-    
-    // For now, use a default API key for subsequent operations
-    // In a full implementation, we'd track which key was used successfully
-    const { data: defaultKeys } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'openrouter')
-      .eq('status', 'active')
-      .limit(1);
-    
-    const openrouterApiKey = defaultKeys?.[0]?.api_key || 'unknown';
+    // Use the working key for the actual article generation
+    const openrouterApiKey = currentKey.api_key;
+    console.log(`🚀 Using API key: ${currentKey.key_name} for article generation`);
 
     // Generate meta description
     const metaResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -1190,60 +1141,28 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
       return res.status(400).json({ error: 'No OpenRouter API keys found' });
     }
 
-    // 🚀 ENTERPRISE-GRADE: Use the new fail-proof parallel processing system
-    console.log(`🚀 Starting enterprise-grade background article generation`);
+    // Test the selected key and update its status
+    const testResult = await testAndUpdateApiKey(supabase, selectedKeys[0]);
     
-    // Create the article generation operation
-    const articleGenerationOperation = async (apiKey) => {
-      console.log(`🔄 Executing background article generation with key: ${apiKey.key_name}`);
-      
-      // Generate the article using the provided API key
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey.api_key}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://your-app.com',
-          'X-Title': 'Article Generator'
-        },
-        body: JSON.stringify({
-          model: 'anthropic/claude-3.5-sonnet',
-          messages: [
-            {
-              role: 'user',
-              content: `Generate a comprehensive article about "${articleRequest.main_keyword}". 
-              Include an introduction, main content sections, and conclusion.
-              Make it engaging and informative.`
-            }
-          ],
-          max_tokens: 4000,
-          temperature: 0.7
-        })
+    if (!testResult.success) {
+      await supabase.from('article_requests').update({
+        status: 'failed',
+        current_step: 'Selected API key failed',
+        error_message: `Key ${testResult.key.key_name} failed with status: ${testResult.key.status}`
+      }).eq('id', requestId);
+
+      return res.status(500).json({ 
+        error: 'Selected API key failed', 
+        key_name: testResult.key.key_name,
+        status: testResult.key.status
       });
+    }
 
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-      }
+    const currentKey = testResult.key;
 
-      const data = await response.json();
-      return data.choices[0].message.content;
-    };
-
-    // Execute with fail-proof retry system
-    const backgroundArticleContent = await executeOperationWithRetry(supabase, req.user.id, 'openrouter', articleGenerationOperation);
-    
-    console.log(`✅ Background article generation completed successfully with enterprise-grade system`);
-    
-    // For subsequent operations, get a working API key
-    const { data: defaultKeys } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'openrouter')
-      .eq('status', 'active')
-      .limit(1);
-    
-    const openrouterApiKey = defaultKeys?.[0]?.api_key || 'unknown';
+    // Use the working key for the actual article generation
+    const openrouterApiKey = currentKey.api_key;
+    console.log(`🚀 Using API key: ${currentKey.key_name} for background article generation`);
 
     // Update progress
     await supabase.from('article_requests').update({
