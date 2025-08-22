@@ -402,8 +402,8 @@ function generateSecureImageUrl(prompt, width, height, seed) {
   return imageUrl;
 }
 
-// 🚀 ENTERPRISE-GRADE: Fail-Proof Parallel Processing System
-// Based on "Parallel Batching for Speed" and "API Key Rotation + Reactivation Logic"
+// 🚀 IMPROVED API Key Rotation & Reactivation Logic
+// Based on our discussion - priority-based system with smart recovery
 
 // Smart key assignment with priority system and round-robin
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) {
@@ -461,115 +461,6 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) 
   return selectedKeys;
 }
 
-// Fail-proof operation retry with key rotation
-async function executeOperationWithRetry(supabase, userId, provider, operation, maxRetries = 5) {
-  let lastError = null;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      // Get next available key for this attempt
-      const keys = await getSmartKeyAssignment(supabase, userId, provider, 1);
-      if (!keys || keys.length === 0) {
-        throw new Error('No API keys available');
-      }
-      
-      const currentKey = keys[0];
-      console.log(`🔄 Attempt ${attempt}/${maxRetries} with key: ${currentKey.key_name} (status: ${currentKey.status})`);
-
-      // Test the key first
-      const testResult = await testAndUpdateApiKey(supabase, currentKey);
-      
-      if (!testResult.success) {
-        console.log(`❌ Key ${currentKey.key_name} failed test, trying next key...`);
-        lastError = new Error(`Key test failed: ${testResult.key.status}`);
-        continue; // Try next key immediately
-      }
-
-      // Key is working - execute operation
-      const result = await operation(testResult.key);
-      
-      // Mark key as successfully used
-      await supabase.from('api_keys').update({
-        last_used: new Date().toISOString(),
-        status: 'active'
-      }).eq('id', currentKey.id);
-
-      console.log(`✅ Operation completed successfully with key: ${currentKey.key_name}`);
-      return result;
-
-    } catch (error) {
-      lastError = error;
-      console.log(`❌ Attempt ${attempt} failed: ${error.message}`);
-      
-      if (attempt === maxRetries) {
-        console.log(`💥 All ${maxRetries} attempts failed`);
-        break;
-      }
-      
-      // Small delay before next attempt (not waiting for key recovery)
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-
-  throw new Error(`Operation failed after ${maxRetries} attempts. Last error: ${lastError?.message}`);
-}
-
-// Parallel batch processing with fail-proof retry
-async function processBatchInParallel(supabase, userId, provider, operations, batchSize = 5) {
-  console.log(`🚀 Starting parallel batch processing: ${operations.length} operations, batch size: ${batchSize}`);
-  
-  // Split operations into batches
-  const batches = [];
-  for (let i = 0; i < operations.length; i += batchSize) {
-    batches.push(operations.slice(i, i + batchSize));
-  }
-
-  console.log(`📦 Created ${batches.length} batches for parallel processing`);
-
-  // Process all batches in parallel
-  const batchPromises = batches.map(async (batch, batchIndex) => {
-    console.log(`🔄 Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} operations`);
-    
-    // Each operation in batch gets its own key (batch-level key diversity)
-    const batchResults = await Promise.allSettled(
-      batch.map(async (operation, operationIndex) => {
-        try {
-          const result = await executeOperationWithRetry(supabase, userId, provider, operation);
-          console.log(`✅ Batch ${batchIndex + 1}, Operation ${operationIndex + 1}: SUCCESS`);
-          return { success: true, result, batchIndex, operationIndex };
-        } catch (error) {
-          console.log(`❌ Batch ${batchIndex + 1}, Operation ${operationIndex + 1}: FAILED - ${error.message}`);
-          return { success: false, error: error.message, batchIndex, operationIndex };
-        }
-      })
-    );
-
-    // Process batch results
-    const successful = batchResults.filter(r => r.status === 'fulfilled' && r.value.success);
-    const failed = batchResults.filter(r => r.status === 'fulfilled' && !r.value.success);
-    
-    console.log(`📊 Batch ${batchIndex + 1} results: ${successful.length} success, ${failed.length} failed`);
-    
-    return { batchIndex, successful, failed };
-  });
-
-  // Wait for all batches to complete
-  const batchResults = await Promise.all(batchPromises);
-  
-  // Aggregate results
-  const allSuccessful = batchResults.flatMap(batch => batch.successful);
-  const allFailed = batchResults.flatMap(batch => batch.failed);
-  
-  console.log(`🎯 Final Results: ${allSuccessful.length} total success, ${allFailed.length} total failed`);
-  
-  return {
-    successful: allSuccessful,
-    failed: allFailed,
-    totalProcessed: operations.length,
-    successRate: (allSuccessful.length / operations.length) * 100
-  };
-}
-
 // Test a single API key and update its status
 async function testAndUpdateApiKey(supabase, key) {
   try {
@@ -594,7 +485,8 @@ async function testAndUpdateApiKey(supabase, key) {
       // Key works - mark as active regardless of previous status
       await supabase.from('api_keys').update({
         last_used: new Date().toISOString(),
-        status: 'active'
+        status: 'active',
+        failure_count: 0
       }).eq('id', key.id);
 
       console.log(`✅ Key ${key.key_name} is now ACTIVE`);
