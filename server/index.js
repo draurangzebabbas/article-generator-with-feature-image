@@ -1,11 +1,3 @@
-is this using exact 
-
-article egenrator with its batch thing and all loging?
-
-just updated the rotationa adn selection and reactivatio for key
-
-if yes give me arrow diagram hwow if not make it exactly following
-
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -97,15 +89,132 @@ export const rateLimitMiddleware = async (req, res, next) => {
   }
 };
 
-// Ensure server listens when run directly
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
-});
-
 // OpenRouter configuration
 const OPENROUTER_REFERER = process.env.OPENROUTER_REFERER || 'https://your-app.com';
 const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
+
+// 🚀 IMPROVED API Key Rotation & Reactivation Logic
+// Based on our discussion - priority-based system with smart recovery
+
+// Smart key assignment with priority system and round-robin
+async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) {
+  // Get all keys for this provider
+  const { data: allKeys } = await supabase
+    .from('api_keys')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('provider', provider)
+    .order('last_used', { ascending: true, nullsFirst: true });
+
+  if (!allKeys || allKeys.length === 0) {
+    throw new Error(`No API keys found for provider: ${provider}`);
+  }
+
+  // Separate keys by priority
+  const activeKeys = allKeys.filter(key => key.status === 'active');
+  const rateLimitedKeys = allKeys.filter(key => key.status === 'rate_limited');
+  const failedKeys = allKeys.filter(key => key.status === 'failed');
+
+  console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed`);
+
+  // Priority 1: Fill with ACTIVE keys first (round-robin)
+  let selectedKeys = [];
+  let activeIndex = 0;
+  
+  for (let i = 0; i < Math.min(requiredCount, activeKeys.length); i++) {
+    selectedKeys.push(activeKeys[activeIndex % activeKeys.length]);
+    activeIndex++;
+  }
+
+  // Priority 2: If need more, add RATE_LIMITED keys (round-robin)
+  if (selectedKeys.length < requiredCount && rateLimitedKeys.length > 0) {
+    let rateLimitedIndex = 0;
+    const remainingNeeded = requiredCount - selectedKeys.length;
+    
+    for (let i = 0; i < Math.min(remainingNeeded, rateLimitedKeys.length); i++) {
+      selectedKeys.push(rateLimitedKeys[rateLimitedIndex % rateLimitedKeys.length]);
+      rateLimitedIndex++;
+    }
+  }
+
+  // Priority 3: If still need more, add FAILED keys (round-robin)
+  if (selectedKeys.length < requiredCount && failedKeys.length > 0) {
+    let failedIndex = 0;
+    const remainingNeeded = requiredCount - selectedKeys.length;
+    
+    for (let i = 0; i < Math.min(remainingNeeded, failedKeys.length); i++) {
+      selectedKeys.push(failedKeys[failedIndex % failedKeys.length]);
+      failedIndex++;
+    }
+  }
+
+  console.log(`🎯 Smart Assignment: ${selectedKeys.length} keys selected for ${requiredCount} operations`);
+  return selectedKeys;
+}
+
+// Test a single API key and update its status
+async function testAndUpdateApiKey(supabase, key) {
+  try {
+    console.log(`🧪 Testing key: ${key.key_name} (current status: ${key.status})`);
+    
+    const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key.api_key}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': OPENROUTER_REFERER,
+        'X-Title': OPENROUTER_TITLE
+      },
+      body: JSON.stringify({
+        model: 'deepseek/deepseek-chat-v3-0324:free',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 10
+      })
+    });
+
+    if (testResponse.ok) {
+      // Key works - mark as active regardless of previous status
+      await supabase.from('api_keys').update({
+        last_used: new Date().toISOString(),
+        status: 'active',
+        failure_count: 0
+      }).eq('id', key.id);
+
+      console.log(`✅ Key ${key.key_name} is now ACTIVE`);
+      return { success: true, key: { ...key, status: 'active' } };
+      
+    } else if (testResponse.status === 429) {
+      // Rate limited - mark as rate_limited
+      await supabase.from('api_keys').update({
+        status: 'rate_limited',
+        last_failed: new Date().toISOString()
+      }).eq('id', key.id);
+
+      console.log(`⏳ Key ${key.key_name} is RATE_LIMITED`);
+      return { success: false, key: { ...key, status: 'rate_limited' } };
+      
+    } else {
+      // Other error - mark as failed
+      await supabase.from('api_keys').update({
+        status: 'failed',
+        last_failed: new Date().toISOString()
+      }).eq('id', key.id);
+
+      console.log(`❌ Key ${key.key_name} is FAILED (HTTP ${testResponse.status})`);
+      return { success: false, key: { ...key, status: 'failed' } };
+    }
+    
+  } catch (error) {
+    // Network/other error - mark as failed
+    await supabase.from('api_keys').update({
+      status: 'failed',
+      last_failed: new Date().toISOString()
+    }).eq('id', key.id);
+
+    console.log(`❌ Key ${key.key_name} is FAILED (error: ${error.message})`);
+    return { success: false, key: { ...key, status: 'failed' } };
+  }
+}
 
 // Function to call OpenRouter API with smart key rotation
 async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, options = {}) {
@@ -556,90 +665,13 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       status: 'pending'
     });
 
-    // Get user's OpenRouter API keys with smart recovery
+    // 🚀 IMPROVED: Use the new smart key assignment system
     console.log(`🔍 Looking for API keys for user: ${req.user.id}`);
     
-    // Smart recovery: Test failed keys before reactivating (10-hour recovery)
-    const tenHoursAgo = new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString();
+    // Get all keys with smart priority-based selection
+    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1);
     
-    // Get failed keys that are older than 10 hours
-    const { data: failedKeys } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'openrouter')
-      .eq('status', 'failed')
-      .lt('last_failed', tenHoursAgo);
-    
-    // Test each failed key before reactivating
-    if (failedKeys && failedKeys.length > 0) {
-      console.log(`🔄 Testing ${failedKeys.length} failed keys for recovery...`);
-      
-      for (const key of failedKeys) {
-        try {
-          // Test the key with a simple API call
-          const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${key.api_key}`,
-              'Content-Type': 'application/json',
-              'HTTP-Referer': OPENROUTER_REFERER,
-              'X-Title': OPENROUTER_TITLE
-            },
-            body: JSON.stringify({
-              model: 'deepseek/deepseek-chat-v3-0324:free',
-              messages: [{ role: 'user', content: 'Test' }],
-              max_tokens: 10
-            })
-          });
-          
-          if (testResponse.ok) {
-            // Key is working - reactivate it
-            await supabase
-              .from('api_keys')
-              .update({ 
-                status: 'active', 
-                failure_count: 0,
-                last_used: new Date().toISOString()
-              })
-              .eq('id', key.id);
-            console.log(`✅ Reactivated key: ${key.key_name}`);
-          } else {
-            // Key is still broken - keep it failed
-            console.log(`❌ Key still broken: ${key.key_name} (${testResponse.status})`);
-          }
-        } catch (error) {
-          // Key test failed - keep it failed
-          console.log(`❌ Key test failed: ${key.key_name} (${error.message})`);
-        }
-      }
-    }
-    
-    // Get available keys (active + rate_limited)
-    let { data: apiKeys, error: keysError } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'openrouter')
-      .in('status', ['active', 'rate_limited']);
-
-    console.log(`🔍 API keys query result:`, { apiKeys, keysError });
-
-    if (keysError) {
-      console.error('❌ Error fetching API keys:', keysError);
-      await supabase.from('analysis_logs').update({
-        status: 'failed',
-        error_message: `Database error: ${keysError.message}`,
-        processing_time: Date.now() - startTime
-      }).eq('request_id', requestId);
-
-      return res.status(500).json({ 
-        error: 'Database error', 
-        message: 'Failed to fetch API keys' 
-      });
-    }
-
-    if (!apiKeys || apiKeys.length === 0) {
+    if (!selectedKeys || selectedKeys.length === 0) {
       console.log(`❌ No API keys found for user ${req.user.id}`);
       
       // Let's also check what keys exist for this user (for debugging)
@@ -662,85 +694,59 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       });
     }
 
-    console.log(`🔑 Found ${apiKeys.length} OpenRouter API keys for user ${req.user.id}`);
+    console.log(`🔑 Found ${selectedKeys.length} OpenRouter API keys for user ${req.user.id}`);
 
+    // Test and update the selected key status
+    const testResult = await testAndUpdateApiKey(supabase, selectedKeys[0]);
+    if (!testResult.success) {
+      console.log(`⚠️ Selected key failed test, but continuing with generation`);
+    }
+
+    const openrouterApiKey = testResult.key.api_key;
     const results = {};
-    const usedKeys = [];
+    const usedKeys = [testResult.key.id];
 
-    // Branch-aware API key rotation
-    const totalKeys = apiKeys.length;
-    const branchIndices = {
-      META: 0,
-      A: totalKeys >= 2 ? 1 % totalKeys : 0,
-      B: totalKeys >= 3 ? 2 % totalKeys : (totalKeys >= 2 ? 1 : 0),
-      FAQ: totalKeys >= 4 ? 3 % totalKeys : (totalKeys >= 3 ? 2 : (totalKeys >= 2 ? 1 : 0)),
-    };
-
-    const getNextApiKeyForBranch = (branch) => {
-      const index = branchIndices[branch] % totalKeys;
-      branchIndices[branch] = (branchIndices[branch] + 1) % totalKeys;
-      return apiKeys[index];
-    };
-
-    // Helper function to execute module with branch-aware key rotation
-    const executeModule = async (moduleName, messages, model, branch, options = {}) => {
-      let success = false;
-      let attempts = 0;
-      const maxAttempts = Math.min(3, apiKeys.length);
-
-      while (!success && attempts < maxAttempts) {
-        const currentKey = getNextApiKeyForBranch(branch);
+    // Helper function to execute module with smart key rotation
+    const executeModule = async (moduleName, messages, model, options = {}) => {
+      try {
+        console.log(`🔄 Executing ${moduleName} with API key: ${testResult.key.key_name}`);
         
-        try {
-          console.log(`🔄 Executing ${moduleName} with API key: ${currentKey.key_name} (Branch: ${branch})`);
-          
-          const result = await callOpenRouterAPI(messages, model, currentKey.api_key, 0, options);
-          
-          // Update key usage
+        const result = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
+        
+        // Update key usage
+        await supabase.from('api_keys').update({
+          last_used: new Date().toISOString(),
+          failure_count: 0,
+          status: 'active'
+        }).eq('id', testResult.key.id);
+
+        console.log(`✅ ${moduleName} completed successfully`);
+        return result;
+        
+      } catch (error) {
+        console.error(`❌ Error in ${moduleName} with API key ${testResult.key.key_name}:`, error.message);
+        
+        // Check if it's a rate limit, credit issue, or invalid key
+        const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+        
+        if (isRateLimit) {
           await supabase.from('api_keys').update({
-            last_used: new Date().toISOString(),
-            failure_count: 0,
-            status: 'active'
-          }).eq('id', currentKey.id);
-
-          usedKeys.push(currentKey.id);
-          success = true;
-          console.log(`✅ ${moduleName} completed successfully`);
-          
-          return result;
-          
-        } catch (error) {
-          console.error(`❌ Error in ${moduleName} with API key ${currentKey.key_name}:`, error.message);
-          
-          // Check if it's a rate limit, credit issue, or invalid key
-          const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
-          const isInvalidKey = error.message.includes('Invalid API key') || error.message.includes('401');
-          const isNetworkError = error.message.includes('network') || error.message.includes('timeout') || error.message.includes('fetch');
-          
-          // Never permanently block keys - all keys can recover after 10 hours
-          if (isRateLimit) {
-            await supabase.from('api_keys').update({
-              status: 'rate_limited',
-              last_failed: new Date().toISOString(),
-              failure_count: currentKey.failure_count + 1
-            }).eq('id', currentKey.id);
-            console.log(`⚠️ Marked API key as rate limited: ${currentKey.key_name}`);
-          } else {
-            // For all other errors (including invalid keys), mark as failed but allow recovery after 10 hours
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString(),
-              failure_count: currentKey.failure_count + 1
-            }).eq('id', currentKey.id);
-            console.log(`⚠️ Marked API key as failed (will recover after 10 hours): ${currentKey.key_name} (${currentKey.failure_count + 1} failures)`);
-          }
-
-          attempts++;
+            status: 'rate_limited',
+            last_failed: new Date().toISOString(),
+            failure_count: testResult.key.failure_count + 1
+          }).eq('id', testResult.key.id);
+          console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
+        } else {
+          // For all other errors, mark as failed
+          await supabase.from('api_keys').update({
+            status: 'failed',
+            last_failed: new Date().toISOString(),
+            failure_count: testResult.key.failure_count + 1
+          }).eq('id', testResult.key.id);
+          console.log(`⚠️ Marked API key as failed: ${testResult.key.key_name} (${testResult.key.failure_count + 1} failures)`);
         }
-      }
 
-      if (!success) {
-        throw new Error(`All API keys failed for ${moduleName}`);
+        throw error;
       }
     };
 
@@ -761,7 +767,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       }
     ];
 
-    const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, models.metaGenerator, 'META', { maxTokens: 3000 });
+    const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, models.metaGenerator, { maxTokens: 3000 });
     const metaData = safeParseJSON(metaResult);
     
     if (!metaData) {
@@ -810,10 +816,11 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
               })
             }
           ];
-          const generated = await executeModule('Feature Image Prompt', imagePromptMessages, models.metaGenerator, 'META', { maxTokens: 300 });
+          const generated = await executeModule('Feature Image Prompt', imagePromptMessages, models.metaGenerator, { maxTokens: 300 });
           featureImagePrompt = (generated || '').trim();
         }
-                // Build N image URLs with varied seed for diversity (using base64 encoding for security)
+        
+        // Build N image URLs with varied seed for diversity (using base64 encoding for security)
         for (let i = 0; i < sanitizedImageCount; i++) {
           const seed = Math.floor(Math.random() * 1e9);
           // Use base64 encoding to hide the prompt from URL
@@ -879,14 +886,14 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         }
       ];
 
-      const toolResult = await executeModule('Tool Generator', toolGeneratorMessages, models.toolGenerator, 'A', { maxTokens: 4000 });
+      const toolResult = await executeModule('Tool Generator', toolGeneratorMessages, models.toolGenerator, { maxTokens: 4000 });
       console.log(`✅ Tool Generator completed, tool length: ${toolResult.length} characters`);
 
       // Tool Validator
       const toolValidatorMessages = [
         {
           role: "system",
-          content: "You are a calculator tool optimizer and validator for WordPress. Your role is to ensure every generated tool:\n\n1. **Works 100% on WordPress** inside a single \"Custom HTML\" block.\n2. **Does NOT return extra explanations or Markdown. Only return raw tool code.**\n3. Tool must include:\n   - Clean HTML (inputs, labels, buttons)\n   - Embedded CSS inside a `<style>` tag\n   - JavaScript inside a `<script>` tag using `document.addEventListener(\"DOMContentLoaded\", ...)`\n   - Output shown in a `.result-container` when \"Calculate\" button is clicked\n4. Code must be:\n   - Compact and functional\n   - Free from formatting issues, broken tags, or smart quotes\n   - Free from `<br />` misuse and accidental line breaks that break WordPress blocks\n   - No external files, no jQuery, no console.log\n   - Correctly using `parseFloat` or `parseInt` to ensure calculations work\n   - Responsive and user-friendly\n   - **Crucially, the tool MUST produce visible, accurate results immediately after clicking \"Calculate\" with no errors or empty output**\n5. DO NOT return anything besides the final raw code block.\n6. The entire tool must be returned as ONE continuous code block with no extra spaces or empty lines that might break WordPress block formatting.\n7. The output must be guaranteed to WORK immediately when pasted into a WordPress \"Custom HTML\" block, showing the calculated result in `.result-container` after clicking the \"Calculate\" button.\n8. If any calculation involves numeric inputs, ensure `parseFloat` or `parseInt` is always used properly before computations.\n9. Example return format:\n\n<div class=\"tool-wrapper\">\r\n  <h2>Tool Title</h2>\r\n  <label for=\"input1\">Label:</label>\r\n  <input type=\"number\" id=\"input1\">\r\n  <button id=\"calculateBtn\">Calculate</button>\r\n  <div id=\"result\" class=\"result-container\"></div>\r\n</div>\r\n<style>\r\n  /* CSS styles here */\r\n</style>\r\n<script>\r\n  document.addEventListener(\"DOMContentLoaded\", function () {\r\n    document.getElementById(\"calculateBtn\").addEventListener(\"click\", function () {\r\n      const input = parseFloat(document.getElementById(\"input1\").value);\r\n      const result = input * 2; // Example logic\r\n      document.getElementById(\"result\").style.display = \"block\";\r\n      document.getElementById(\"result\").innerText = \"Result: \" + result;\r\n    });\r\n  });\r\n</script>\r\n\nDo not break output into multiple blocks. Return only one full code block that can be copy-pasted into WordPress and work immediately.\r\n\r\nPlease, ensure the tool always displays the calculated results visibly and correctly upon clicking \"Calculate\".\n\n\nreturn me just working tool code dont add any heading explanation any faq or anything which is not code tool just make sure all tool code is functional and code work in wordpress greate\n\nmake sure results are shown properly when calculat button is clicked"
+          content: "You are a calculator tool optimizer and validator for WordPress. Your role is to ensure every generated tool:\n\n1. **Works 100% on WordPress** inside a single \"Custom HTML\" block.\n2. **Does NOT return extra explanations or Markdown. Only return raw tool code.**\n3. Tool must include:\n   - Clean HTML (inputs, labels, buttons)\n   - Embedded CSS inside a `<style>` tag\n   - JavaScript inside a `<script>` tag using `document.addEventListener(\"DOMContentLoaded\", ...)`\n   - Output shown in a styled box using `<div id=\"result\">` or `.result-container`\n4. Code must be:\n   - Compact and functional\n   - Free from formatting issues, broken tags, or smart quotes\n   - Free from `<br />` misuse and accidental line breaks that break WordPress blocks\n   - No external files, no jQuery, no console.log\n   - Correctly using `parseFloat` or `parseInt` to ensure calculations work\n   - Responsive and user-friendly\n   - **Crucially, the tool MUST produce visible, accurate results immediately after clicking \"Calculate\" with no errors or empty output**\n5. DO NOT return anything besides the final raw code block.\n6. The entire tool must be returned as ONE continuous code block with no extra spaces or empty lines that might break WordPress block formatting.\n7. The output must be guaranteed to WORK immediately when pasted into a WordPress \"Custom HTML\" block, showing the calculated result in `.result-container` after clicking the \"Calculate\" button.\n8. If any calculation involves numeric inputs, ensure `parseFloat` or `parseInt` is always used properly before computations.\n9. Example return format:\n\n<div class=\"tool-wrapper\">\r\n  <h2>Tool Title</h2>\r\n  <label for=\"input1\">Label:</label>\r\n  <input type=\"number\" id=\"input1\">\r\n  <button id=\"calculateBtn\">Calculate</button>\r\n  <div id=\"result\" class=\"result-container\"></div>\r\n</div>\r\n<style>\r\n  /* CSS styles here */\r\n</style>\r\n<script>\r\n  document.addEventListener(\"DOMContentLoaded\", function () {\r\n    document.getElementById(\"calculateBtn\").addEventListener(\"click\", function () {\r\n      const input = parseFloat(document.getElementById(\"input1\").value);\r\n      const result = input * 2; // Example logic\r\n      document.getElementById(\"result\").style.display = \"block\";\r\n      document.getElementById(\"result\").innerText = \"Result: \" + result;\r\n    });\r\n  });\r\n</script>\r\n\nDo not break output into multiple blocks. Return only one full code block that can be copy-pasted into WordPress and work immediately.\r\n\r\nPlease, ensure the tool always displays the calculated results visibly and correctly upon clicking \"Calculate\".\n\n\nreturn me just working tool code dont add any heading explanation any faq or anything which is not code tool just make sure all tool code is functional and code work in wordpress greate\n\nmake sure results are shown properly when calculat button is clicked"
         },
         {
           role: "user",
@@ -894,7 +901,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         }
       ];
 
-      const validatedToolResult = await executeModule('Tool Validator', toolValidatorMessages, models.toolValidator, 'A', { maxTokens: 4000 });
+      const validatedToolResult = await executeModule('Tool Validator', toolValidatorMessages, models.toolValidator, { maxTokens: 4000 });
       console.log(`✅ Tool Validator completed, validated tool length: ${validatedToolResult.length} characters`);
 
       // Guide Generator
@@ -913,7 +920,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         }
       ];
 
-      const guideResult = await executeModule('Guide Generator', guideGeneratorMessages, models.guideGenerator, 'A', { maxTokens: 4000 });
+      const guideResult = await executeModule('Guide Generator', guideGeneratorMessages, models.guideGenerator, { maxTokens: 4000 });
       console.log(`✅ Guide Generator completed, guide length: ${guideResult.length} characters`);
 
       return { toolResult, validatedToolResult, guideResult };
@@ -937,7 +944,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         }
       ];
 
-      const section1Result = await executeModule('Section 1 Generator', section1GeneratorMessages, models.section1Generator, 'B', { maxTokens: 4000 });
+      const section1Result = await executeModule('Section 1 Generator', section1GeneratorMessages, models.section1Generator, { maxTokens: 4000 });
       console.log(`✅ Section 1 Generator completed, content length: ${section1Result.length} characters`);
 
       // Section 2 Generator (optimized - creates its own transition)
@@ -954,7 +961,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         }
       ];
 
-      const section2Result = await executeModule('Section 2 Generator', section2GeneratorMessages, models.section2Generator, 'B', { maxTokens: 4000 });
+      const section2Result = await executeModule('Section 2 Generator', section2GeneratorMessages, models.section2Generator, { maxTokens: 4000 });
       console.log(`✅ Section 2 Generator completed, content length: ${section2Result.length} characters`);
 
       return { section1Result, section2Result };
@@ -976,7 +983,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         }
       ];
 
-      const faqResult = await executeModule('FAQ Generator', faqGeneratorMessages, models.faqGenerator, 'FAQ', { maxTokens: 2000 });
+      const faqResult = await executeModule('FAQ Generator', faqGeneratorMessages, models.faqGenerator, { maxTokens: 2000 });
       console.log(`✅ FAQ Generator completed, FAQ length: ${faqResult.length} characters`);
       
       return faqResult;
@@ -1258,177 +1265,6 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
   }
 });
 
-// Webhook endpoint for article generation (Make.com friendly)
-app.post('/api/generate-article-webhook', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  const startTime = Date.now();
-  const requestId = uuidv4();
-  
-  try {
-    const { mainKeyword, top10Articles, relatedKeywords, guidelines } = req.body;
-    
-    if (!mainKeyword || !top10Articles || !relatedKeywords) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'mainKeyword, top10Articles, and relatedKeywords are required' 
-      });
-    }
-
-    // Log the request
-    await supabase.from('analysis_logs').insert({
-      user_id: req.user.id,
-      request_id: requestId,
-      keywords: [mainKeyword],
-      status: 'pending'
-    });
-
-    // Get user's OpenRouter API keys with smart recovery
-    // Smart recovery: Test failed keys before reactivating (10-hour recovery)
-    const tenHoursAgo = new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString();
-    
-    // Get failed keys that are older than 10 hours
-    const { data: failedKeys } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'openrouter')
-      .eq('status', 'failed')
-      .lt('last_failed', tenHoursAgo);
-    
-    // Test each failed key before reactivating
-    if (failedKeys && failedKeys.length > 0) {
-      console.log(`🔄 Testing ${failedKeys.length} failed keys for recovery...`);
-      
-      for (const key of failedKeys) {
-        try {
-          // Test the key with a simple API call
-          const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${key.api_key}`,
-              'Content-Type': 'application/json',
-              'HTTP-Referer': OPENROUTER_REFERER,
-              'X-Title': OPENROUTER_TITLE
-            },
-            body: JSON.stringify({
-              model: 'deepseek/deepseek-chat-v3-0324:free',
-              messages: [{ role: 'user', content: 'Test' }],
-              max_tokens: 10
-            })
-          });
-          
-          if (testResponse.ok) {
-            // Key is working - reactivate it
-            await supabase
-              .from('api_keys')
-              .update({ 
-                status: 'active', 
-                failure_count: 0,
-                last_used: new Date().toISOString()
-              })
-              .eq('id', key.id);
-            console.log(`✅ Reactivated key: ${key.key_name}`);
-          } else {
-            // Key is still broken - keep it failed
-            console.log(`❌ Key still broken: ${key.key_name} (${testResponse.status})`);
-          }
-        } catch (error) {
-          // Key test failed - keep it failed
-          console.log(`❌ Key test failed: ${key.key_name} (${error.message})`);
-        }
-      }
-    }
-    
-    // Get available keys (active + rate_limited)
-    const { data: apiKeys, error: keysError } = await supabase
-      .from('api_keys')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .eq('provider', 'openrouter')
-      .in('status', ['active', 'rate_limited']);
-
-    console.log(`🔍 API keys query result:`, { apiKeys, keysError });
-
-    if (keysError) {
-      console.error('❌ Error fetching API keys:', keysError);
-      await supabase.from('analysis_logs').update({
-        status: 'failed',
-        error_message: `Database error: ${keysError.message}`,
-        processing_time: Date.now() - startTime
-      }).eq('request_id', requestId);
-
-      return res.status(500).json({ 
-        error: 'Database error', 
-        message: 'Failed to fetch API keys' 
-      });
-    }
-
-    if (!apiKeys || apiKeys.length === 0) {
-      console.log(`❌ No API keys found for user ${req.user.id}`);
-      
-      // Let's also check what keys exist for this user (for debugging)
-      const { data: allUserKeys } = await supabase
-        .from('api_keys')
-        .select('id, provider, status, user_id')
-        .eq('user_id', req.user.id);
-      
-      console.log(`🔍 All keys for user ${req.user.id}:`, allUserKeys);
-      
-      await supabase.from('analysis_logs').update({
-        status: 'failed',
-        error_message: 'No OpenRouter API keys available',
-        processing_time: Date.now() - startTime
-      }).eq('request_id', requestId);
-
-      return res.status(400).json({ 
-        error: 'No API keys', 
-        message: 'Please add at least one OpenRouter API key' 
-      });
-    }
-
-    // Execute the main article generation logic (simplified for webhook)
-    // This would call the same functions as the main endpoint
-    // For now, we'll return a success response with the request details
-
-    const processingTime = Date.now() - startTime;
-
-    // Update the log
-    await supabase.from('analysis_logs').update({
-      status: 'completed',
-      processing_time: processingTime
-    }).eq('request_id', requestId);
-
-    // Return flat JSON structure for Make.com
-    const flatResponse = {
-      request_id: requestId,
-      main_keyword: mainKeyword,
-      processing_time: processingTime,
-      api_keys_used: apiKeys.length,
-      status: 'completed',
-      message: 'Article generation webhook endpoint ready for implementation'
-    };
-
-    res.json(flatResponse);
-
-  } catch (error) {
-    console.error('Article generation webhook error:', error);
-    
-    const processingTime = Date.now() - startTime;
-    
-    await supabase.from('analysis_logs').update({
-      status: 'failed',
-      error_message: error.message,
-      processing_time: processingTime
-    }).eq('request_id', requestId);
-
-    res.status(500).json({ 
-      error: 'Article generation failed', 
-      message: error.message,
-      request_id: requestId,
-      processing_time: processingTime
-    });
-  }
-});
-
 // Lightweight health check
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -1442,8 +1278,7 @@ app.get('/api/test', (_req, res) => {
     version: '1.0.0',
     endpoints: [
       '/api/generate-article',
-      '/api/generate-article-webhook',
-      '/api/extract-contacts',
+      '/api/generate-article-background',
       '/api/test-webhook',
       '/api/test-apify',
       '/api/debug/keys'
@@ -1562,7 +1397,7 @@ app.post('/api/recover-keys', rateLimitMiddleware, authMiddleware, async (req, r
     if (!failedKeys || failedKeys.length === 0) {
       return res.json({ 
         status: 'success', 
-        message: 'No failed keys to recover (all keys are either active, rate_limited, or failed less than 10 hours ago)',
+        message: 'No failed keys to recover',
         recovered: 0,
         still_failed: 0
       });
@@ -1626,32 +1461,6 @@ app.post('/api/recover-keys', rateLimitMiddleware, authMiddleware, async (req, r
   }
 });
 
-// Contact extraction endpoint (placeholder for now)
-app.post('/api/extract-contacts', rateLimitMiddleware, authMiddleware, async (req, res) => {
-  try {
-    const { domains } = req.body;
-    
-    if (!domains || !Array.isArray(domains)) {
-      return res.status(400).json({ 
-        error: 'Invalid request', 
-        message: 'domains array is required' 
-      });
-    }
-
-    // For now, return a placeholder response
-    // This would integrate with Apify or similar service
-    res.json({
-      status: 'success',
-      message: 'Contact extraction endpoint ready for implementation',
-      domains_received: domains,
-      user_id: req.user.id,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Contact extraction failed', message: error.message });
-  }
-});
-
 // Global error handler (ensure this is last)
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
@@ -1659,4 +1468,15 @@ app.use((err, _req, res, _next) => {
     error: 'Internal server error',
     message: err?.message || 'An unexpected error occurred'
   });
+});
+
+// Ensure server listens when run directly
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`🚀 Article Generator Server listening on port ${port}`);
+  console.log(`📚 Available endpoints:`);
+  console.log(`   POST /api/generate-article - Main article generation`);
+  console.log(`   POST /api/generate-article-background - Background processing`);
+  console.log(`   GET  /health - Health check`);
+  console.log(`   GET  /api/test - API information`);
 });
