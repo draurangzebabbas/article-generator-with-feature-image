@@ -712,35 +712,35 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         console.log(`🔄 Executing ${moduleName} with API key: ${testResult.key.key_name}`);
         
         const result = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
-        
-        // Update key usage
-        await supabase.from('api_keys').update({
-          last_used: new Date().toISOString(),
-          failure_count: 0,
-          status: 'active'
+          
+          // Update key usage
+          await supabase.from('api_keys').update({
+            last_used: new Date().toISOString(),
+            failure_count: 0,
+            status: 'active'
         }).eq('id', testResult.key.id);
 
-        console.log(`✅ ${moduleName} completed successfully`);
-        return result;
-        
-      } catch (error) {
+          console.log(`✅ ${moduleName} completed successfully`);
+          return result;
+          
+        } catch (error) {
         console.error(`❌ Error in ${moduleName} with API key ${testResult.key.key_name}:`, error.message);
-        
-        // Check if it's a rate limit, credit issue, or invalid key
-        const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
-        
-        if (isRateLimit) {
-          await supabase.from('api_keys').update({
-            status: 'rate_limited',
-            last_failed: new Date().toISOString(),
+          
+          // Check if it's a rate limit, credit issue, or invalid key
+          const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+          
+          if (isRateLimit) {
+            await supabase.from('api_keys').update({
+              status: 'rate_limited',
+              last_failed: new Date().toISOString(),
             failure_count: testResult.key.failure_count + 1
           }).eq('id', testResult.key.id);
           console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
-        } else {
+          } else {
           // For all other errors, mark as failed
-          await supabase.from('api_keys').update({
-            status: 'failed',
-            last_failed: new Date().toISOString(),
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString(),
             failure_count: testResult.key.failure_count + 1
           }).eq('id', testResult.key.id);
           console.log(`⚠️ Marked API key as failed: ${testResult.key.key_name} (${testResult.key.failure_count + 1} failures)`);
@@ -1177,9 +1177,9 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     } = requestData;
 
     // Update progress
-    await supabase
+            await supabase
       .from('article_requests')
-      .update({ 
+              .update({ 
         current_step: 'Generating metadata and structure',
         progress_percentage: 20
       })
@@ -1241,7 +1241,7 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     await supabase
       .from('article_requests')
       .update({ 
-        status: 'completed',
+      status: 'completed',
         current_step: 'Generation completed successfully',
         progress_percentage: 100,
         completed_at: new Date().toISOString()
@@ -1257,7 +1257,7 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     await supabase
       .from('article_requests')
       .update({ 
-        status: 'failed',
+      status: 'failed',
         current_step: 'Generation failed',
         error_message: error.message
       })
