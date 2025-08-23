@@ -1,4 +1,4 @@
-//Working great
+//Request-Level Timeout Protection
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -96,6 +96,19 @@ const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
 // Based on our discussion - priority-based system with smart recovery
+// 
+// NEW FEATURES ADDED:
+// ✅ Smart failure detection - prevents infinite loops when all keys are failed
+// ✅ Request-level timeout protection (5 minutes total)
+// ✅ Automatic key switching when current key fails
+// ✅ Alternative key testing and fallback
+// 
+// HOW IT WORKS:
+// 1. Check if ALL keys failed recently (within 5 minutes) - if yes, fail immediately
+// 2. Select keys using priority: active → rate_limited → failed (round-robin)
+// 3. If current key fails, automatically try alternative keys
+// 4. Overall request timeout prevents infinite loops
+// 5. All existing rotation, labeling, and reactivation logic remains unchanged
 
 // Smart key assignment with priority system and round-robin
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) {
@@ -117,6 +130,18 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) 
   const failedKeys = allKeys.filter(key => key.status === 'failed');
 
   console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed`);
+
+  // 🚨 NEW: Check if ALL keys are failed with recent failures (within last 5 minutes)
+  const recentFailureThreshold = new Date(Date.now() - 5 * 60 * 1000); // 5 minutes ago
+  const allRecentlyFailed = allKeys.every(key => 
+    key.status === 'failed' && 
+    key.last_failed && 
+    new Date(key.last_failed) > recentFailureThreshold
+  );
+
+  if (allRecentlyFailed) {
+    throw new Error(`All API keys are recently failed. Please wait 5 minutes or add new keys.`);
+  }
 
   // Priority 1: Fill with ACTIVE keys first (round-robin)
   let selectedKeys = [];
@@ -666,8 +691,12 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       status: 'pending'
     });
 
-    // 🚀 IMPROVED: Use the new smart key assignment system
+    // 🚀 IMPROVED: Use the new smart key assignment system with timeout protection
     console.log(`🔍 Looking for API keys for user: ${req.user.id}`);
+    
+    // Add request-level timeout protection
+    const REQUEST_TIMEOUT = 300000; // 5 minutes total
+    const requestStartTime = Date.now();
     
     // Get all keys with smart priority-based selection
     const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1);
@@ -707,44 +736,82 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const results = {};
     const usedKeys = [testResult.key.id];
 
-    // Helper function to execute module with smart key rotation
+    // 🚀 NEW: Helper function to execute module with smart key rotation and timeout protection
     const executeModule = async (moduleName, messages, model, options = {}) => {
+      // Check if we've exceeded request timeout
+      if (Date.now() - requestStartTime > REQUEST_TIMEOUT) {
+        throw new Error('Request timeout exceeded - all keys may be failed');
+      }
+
       try {
         console.log(`🔄 Executing ${moduleName} with API key: ${testResult.key.key_name}`);
         
         const result = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
           
-          // Update key usage
-          await supabase.from('api_keys').update({
-            last_used: new Date().toISOString(),
-            failure_count: 0,
-            status: 'active'
+        // Update key usage
+        await supabase.from('api_keys').update({
+          last_used: new Date().toISOString(),
+          failure_count: 0,
+          status: 'active'
         }).eq('id', testResult.key.id);
 
-          console.log(`✅ ${moduleName} completed successfully`);
-          return result;
+        console.log(`✅ ${moduleName} completed successfully`);
+        return result;
           
-        } catch (error) {
+      } catch (error) {
         console.error(`❌ Error in ${moduleName} with API key ${testResult.key.key_name}:`, error.message);
           
-          // Check if it's a rate limit, credit issue, or invalid key
-          const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+        // Check if it's a rate limit, credit issue, or invalid key
+        const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
           
-          if (isRateLimit) {
-            await supabase.from('api_keys').update({
-              status: 'rate_limited',
-              last_failed: new Date().toISOString(),
+        if (isRateLimit) {
+          await supabase.from('api_keys').update({
+            status: 'rate_limited',
+            last_failed: new Date().toISOString(),
             failure_count: testResult.key.failure_count + 1
           }).eq('id', testResult.key.id);
           console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
-          } else {
+        } else {
           // For all other errors, mark as failed
-            await supabase.from('api_keys').update({
-              status: 'failed',
-              last_failed: new Date().toISOString(),
+          await supabase.from('api_keys').update({
+            status: 'failed',
+            last_failed: new Date().toISOString(),
             failure_count: testResult.key.failure_count + 1
           }).eq('id', testResult.key.id);
           console.log(`⚠️ Marked API key as failed: ${testResult.key.key_name} (${testResult.key.failure_count + 1} failures)`);
+        }
+
+        // 🚀 NEW: Try to get a different key if current one fails
+        try {
+          const alternativeKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1);
+          if (alternativeKeys.length > 0 && alternativeKeys[0].id !== testResult.key.id) {
+            console.log(`🔄 Trying alternative key: ${alternativeKeys[0].key_name}`);
+            
+            // Test the alternative key
+            const altTestResult = await testAndUpdateApiKey(supabase, alternativeKeys[0]);
+            if (altTestResult.success) {
+              console.log(`✅ Alternative key works! Using: ${altTestResult.key.key_name}`);
+              
+              // Update the current key reference
+              const altOpenrouterApiKey = altTestResult.key.api_key;
+              usedKeys.push(altTestResult.key.id);
+              
+              // Try the operation again with the alternative key
+              const altResult = await callOpenRouterAPI(messages, model, altOpenrouterApiKey, 0, options);
+              
+              // Update alternative key usage
+              await supabase.from('api_keys').update({
+                last_used: new Date().toISOString(),
+                failure_count: 0,
+                status: 'active'
+              }).eq('id', altTestResult.key.id);
+              
+              console.log(`✅ ${moduleName} completed successfully with alternative key`);
+              return altResult;
+            }
+          }
+        } catch (altError) {
+          console.log(`⚠️ Alternative key attempt failed: ${altError.message}`);
         }
 
         throw error;
@@ -1129,7 +1196,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
   }
 });
 
-// Background article generation endpoint
+// Background article generation endpoint with smart key rotation
 app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware, async (req, res) => {
   const { requestId } = req.body;
   
@@ -1141,6 +1208,10 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
   res.json({ status: 'processing', requestId });
 
   try {
+    // Add request-level timeout protection
+    const REQUEST_TIMEOUT = 300000; // 5 minutes total
+    const requestStartTime = Date.now();
+
     // Update status to generating
     await supabase
       .from('article_requests')
@@ -1177,10 +1248,18 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
       models
     } = requestData;
 
+    // 🚀 NEW: Check if we have working API keys before starting
+    try {
+      const selectedKeys = await getSmartKeyAssignment(supabase, requestData.user_id, 'openrouter', 1);
+      console.log(`🔑 Background generation: Found ${selectedKeys.length} keys for user ${requestData.user_id}`);
+    } catch (keyError) {
+      throw new Error(`API key issue: ${keyError.message}`);
+    }
+
     // Update progress
-            await supabase
+    await supabase
       .from('article_requests')
-              .update({ 
+      .update({ 
         current_step: 'Generating metadata and structure',
         progress_percentage: 20
       })
@@ -1242,7 +1321,7 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     await supabase
       .from('article_requests')
       .update({ 
-      status: 'completed',
+        status: 'completed',
         current_step: 'Generation completed successfully',
         progress_percentage: 100,
         completed_at: new Date().toISOString()
@@ -1258,7 +1337,7 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     await supabase
       .from('article_requests')
       .update({ 
-      status: 'failed',
+        status: 'failed',
         current_step: 'Generation failed',
         error_message: error.message
       })
