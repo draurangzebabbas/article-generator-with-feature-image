@@ -1,4 +1,4 @@
-//Priority based start too
+//Key labeling
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -763,9 +763,11 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const testResult = await testAndUpdateApiKey(supabase, selectedKeys[0]);
     if (!testResult.success) {
       console.log(`⚠️ Selected key failed test, but continuing with generation`);
+    } else {
+      console.log(`✅ Selected key passed test and is marked as active`);
     }
 
-    const openrouterApiKey = testResult.key.api_key;
+    let openrouterApiKey = testResult.key.api_key;  // Changed from const to let
     const results = {};
     const usedKeys = [testResult.key.id];
 
@@ -776,7 +778,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         
         const result = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
           
-          // Update key usage
+          // Update key usage and mark as active since it worked
           await supabase.from('api_keys').update({
             last_used: new Date().toISOString(),
             failure_count: 0,
@@ -827,7 +829,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             // Retry the operation with the replacement key
             const retryResult = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
             
-            // Update replacement key usage
+            // Update replacement key usage and mark as active since it worked
             await supabase.from('api_keys').update({
               last_used: new Date().toISOString(),
               failure_count: 0,
