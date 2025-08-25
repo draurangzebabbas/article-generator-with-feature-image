@@ -1,4 +1,4 @@
-//Active keys first
+//Priority based start too
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -95,9 +95,9 @@ const OPENROUTER_REFERER = process.env.OPENROUTER_REFERER || 'https://your-app.c
 const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
-// Active-only initial assignment with runtime replacement system and request-level cooldown
+// Priority-based initial assignment (active → rate_limited → failed) with runtime replacement system and request-level cooldown
 
-// Smart key assignment - ONLY active keys initially, runtime replacement for failures
+// Smart key assignment - Priority-based initial assignment with runtime replacement for failures
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
   // Get all keys for this provider
   const { data: allKeys } = await supabase
@@ -118,17 +118,43 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
 
   console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed (excluding ${failedKeysInRequest.size} failed in current request)`);
 
-  // ONLY assign ACTIVE keys initially (even if we need more)
+  // 🚀 PRIORITY-BASED INITIAL ASSIGNMENT: active → rate_limited → failed
   let selectedKeys = [];
-  let activeIndex = 0;
+  let keyIndex = 0;
   
-  for (let i = 0; i < Math.min(requiredCount, activeKeys.length); i++) {
-    selectedKeys.push(activeKeys[activeIndex % activeKeys.length]);
-    activeIndex++;
+  // Priority 1: Try to get ACTIVE keys first
+  if (activeKeys.length > 0) {
+    for (let i = 0; i < Math.min(requiredCount, activeKeys.length); i++) {
+      selectedKeys.push(activeKeys[keyIndex % activeKeys.length]);
+      keyIndex++;
+    }
+    console.log(`🎯 Initial Assignment: ${selectedKeys.length} ACTIVE keys selected (need ${requiredCount}, have ${activeKeys.length} active)`);
+    return selectedKeys;
+  }
+  
+  // Priority 2: If no active keys, try RATE_LIMITED keys
+  if (rateLimitedKeys.length > 0) {
+    for (let i = 0; i < Math.min(requiredCount, rateLimitedKeys.length); i++) {
+      selectedKeys.push(rateLimitedKeys[keyIndex % rateLimitedKeys.length]);
+      keyIndex++;
+    }
+    console.log(`⚠️ Initial Assignment: ${selectedKeys.length} RATE_LIMITED keys selected (need ${requiredCount}, have ${rateLimitedKeys.length} rate_limited, no active available)`);
+    return selectedKeys;
+  }
+  
+  // Priority 3: If no active or rate_limited keys, try FAILED keys
+  if (failedKeys.length > 0) {
+    for (let i = 0; i < Math.min(requiredCount, failedKeys.length); i++) {
+      selectedKeys.push(failedKeys[keyIndex % failedKeys.length]);
+      keyIndex++;
+    }
+    console.log(`🔴 Initial Assignment: ${selectedKeys.length} FAILED keys selected (need ${requiredCount}, have ${failedKeys.length} failed, no active/rate_limited available)`);
+    return selectedKeys;
   }
 
-  console.log(`🎯 Initial Assignment: ${selectedKeys.length} active keys selected (need ${requiredCount}, have ${activeKeys.length} active)`);
-  return selectedKeys;
+  // If we get here, no keys are available at all
+  console.log(`❌ No keys available for initial assignment`);
+  return [];
 }
 
 // Function to get replacement key when current key fails
@@ -709,7 +735,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1, failedKeysInRequest);
     
     if (!selectedKeys || selectedKeys.length === 0) {
-      console.log(`❌ No API keys found for user ${req.user.id}`);
+      console.log(`❌ No API keys available for user ${req.user.id}`);
       
       // Let's also check what keys exist for this user (for debugging)
       const { data: allUserKeys } = await supabase
@@ -721,13 +747,13 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       
       await supabase.from('analysis_logs').update({
         status: 'failed',
-        error_message: 'No OpenRouter API keys available',
+        error_message: 'No OpenRouter API keys available (all keys are inactive)',
         processing_time: Date.now() - startTime
       }).eq('request_id', requestId);
 
       return res.status(400).json({ 
         error: 'No API keys', 
-        message: 'Please add at least one OpenRouter API key' 
+        message: 'Please add at least one OpenRouter API key or reactivate your existing keys' 
       });
     }
 
