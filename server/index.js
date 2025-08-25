@@ -1,4 +1,4 @@
-//Key rotation and fall back models
+//Remove Testing Of Fallback Models
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -94,12 +94,12 @@ export const rateLimitMiddleware = async (req, res, next) => {
 const OPENROUTER_REFERER = process.env.OPENROUTER_REFERER || 'https://your-app.com';
 const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
-// Model fallback system with priority order
+// Model fallback system - use default first, then fallbacks if rate limited
 const MODEL_FALLBACKS = [
-  'deepseek/deepseek-r1-0528:free',
-  'deepseek/deepseek-chat-v3-0324:free', 
-  'deepseek/deepseek-r1:free',
-  'google/gemini-2.0-flash-exp:free'
+  'deepseek/deepseek-r1-0528:free',        // Default model (no testing)
+  'deepseek/deepseek-chat-v3-0324:free',   // Fallback 1 (if default fails)
+  'deepseek/deepseek-r1:free',             // Fallback 2 (if fallback 1 fails)
+  'google/gemini-2.0-flash-exp:free'       // Fallback 3 (if fallback 2 fails)
 ];
 
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
@@ -395,48 +395,7 @@ async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, option
   }
 }
 
-// Function to find the best available model (with fallback support)
-async function findBestAvailableModel(apiKey, messages, options = {}) {
-  for (let i = 0; i < MODEL_FALLBACKS.length; i++) {
-    const model = MODEL_FALLBACKS[i];
-    try {
-      console.log(`🧪 Testing model: ${model}`);
-      
-      const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': OPENROUTER_REFERER,
-          'X-Title': OPENROUTER_TITLE
-        },
-        body: JSON.stringify({
-          model: model,
-          messages: [{ role: 'user', content: 'Test' }],
-          max_tokens: 10
-        })
-      });
 
-      if (testResponse.ok) {
-        console.log(`✅ Model ${model} is available`);
-        return model;
-      } else if (testResponse.status === 429) {
-        console.log(`⏳ Model ${model} is rate limited, trying next...`);
-        continue;
-      } else {
-        console.log(`❌ Model ${model} failed with status ${testResponse.status}`);
-        continue;
-      }
-    } catch (error) {
-      console.log(`❌ Model ${model} test failed: ${error.message}`);
-      continue;
-    }
-  }
-  
-  // If all models fail, return the first one as fallback
-  console.log(`⚠️ All models failed, using fallback: ${MODEL_FALLBACKS[0]}`);
-  return MODEL_FALLBACKS[0];
-}
 
 // Function to parse JSON safely
 function safeParseJSON(jsonString) {
@@ -956,9 +915,9 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     // Step 1: Meta & Toc Generator
     console.log(`🚀 Starting Meta & Toc Generator for keyword: ${sanitizedMainKeyword}`);
     
-    // Find the best available model for this key
-    const bestModel = await findBestAvailableModel(openrouterApiKey, [], { maxTokens: 3000 });
-    console.log(`🎯 Using best available model: ${bestModel}`);
+    // Use default model directly (no testing)
+    const defaultModel = MODEL_FALLBACKS[0];
+    console.log(`🎯 Using default model: ${defaultModel}`);
     
     const metaGeneratorMessages = [
       {
@@ -975,7 +934,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       }
     ];
 
-    const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, bestModel, { maxTokens: 3000 });
+    const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, defaultModel, { maxTokens: 3000 });
     const metaData = safeParseJSON(metaResult);
     
     if (!metaData) {
