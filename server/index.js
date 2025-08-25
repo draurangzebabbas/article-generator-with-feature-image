@@ -1,4 +1,4 @@
-//Request-Level Timeout Protection
+//Active keys first
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -95,23 +95,10 @@ const OPENROUTER_REFERER = process.env.OPENROUTER_REFERER || 'https://your-app.c
 const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
-// Based on our discussion - priority-based system with smart recovery
-// 
-// NEW FEATURES ADDED:
-// ✅ Smart failure detection - prevents infinite loops when all keys are failed
-// ✅ Request-level timeout protection (5 minutes total)
-// ✅ Automatic key switching when current key fails
-// ✅ Alternative key testing and fallback
-// 
-// HOW IT WORKS:
-// 1. Check if ALL keys failed recently (within 5 minutes) - if yes, fail immediately
-// 2. Select keys using priority: active → rate_limited → failed (round-robin)
-// 3. If current key fails, automatically try alternative keys
-// 4. Overall request timeout prevents infinite loops
-// 5. All existing rotation, labeling, and reactivation logic remains unchanged
+// Active-only initial assignment with runtime replacement system and request-level cooldown
 
-// Smart key assignment with priority system and round-robin
-async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) {
+// Smart key assignment - ONLY active keys initially, runtime replacement for failures
+async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
   // Get all keys for this provider
   const { data: allKeys } = await supabase
     .from('api_keys')
@@ -124,26 +111,14 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) 
     throw new Error(`No API keys found for provider: ${provider}`);
   }
 
-  // Separate keys by priority
-  const activeKeys = allKeys.filter(key => key.status === 'active');
-  const rateLimitedKeys = allKeys.filter(key => key.status === 'rate_limited');
-  const failedKeys = allKeys.filter(key => key.status === 'failed');
+  // Separate keys by priority and filter out keys that failed in current request
+  const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
+  const rateLimitedKeys = allKeys.filter(key => key.status === 'rate_limited' && !failedKeysInRequest.has(key.id));
+  const failedKeys = allKeys.filter(key => key.status === 'failed' && !failedKeysInRequest.has(key.id));
 
-  console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed`);
+  console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed (excluding ${failedKeysInRequest.size} failed in current request)`);
 
-  // 🚨 NEW: Check if ALL keys are failed with recent failures (within last 5 minutes)
-  const recentFailureThreshold = new Date(Date.now() - 5 * 60 * 1000); // 5 minutes ago
-  const allRecentlyFailed = allKeys.every(key => 
-    key.status === 'failed' && 
-    key.last_failed && 
-    new Date(key.last_failed) > recentFailureThreshold
-  );
-
-  if (allRecentlyFailed) {
-    throw new Error(`All API keys are recently failed. Please wait 5 minutes or add new keys.`);
-  }
-
-  // Priority 1: Fill with ACTIVE keys first (round-robin)
+  // ONLY assign ACTIVE keys initially (even if we need more)
   let selectedKeys = [];
   let activeIndex = 0;
   
@@ -152,30 +127,63 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount) 
     activeIndex++;
   }
 
-  // Priority 2: If need more, add RATE_LIMITED keys (round-robin)
-  if (selectedKeys.length < requiredCount && rateLimitedKeys.length > 0) {
-    let rateLimitedIndex = 0;
-    const remainingNeeded = requiredCount - selectedKeys.length;
-    
-    for (let i = 0; i < Math.min(remainingNeeded, rateLimitedKeys.length); i++) {
-      selectedKeys.push(rateLimitedKeys[rateLimitedIndex % rateLimitedKeys.length]);
-      rateLimitedIndex++;
-    }
-  }
-
-  // Priority 3: If still need more, add FAILED keys (round-robin)
-  if (selectedKeys.length < requiredCount && failedKeys.length > 0) {
-    let failedIndex = 0;
-    const remainingNeeded = requiredCount - selectedKeys.length;
-    
-    for (let i = 0; i < Math.min(remainingNeeded, failedKeys.length); i++) {
-      selectedKeys.push(failedKeys[failedIndex % failedKeys.length]);
-      failedIndex++;
-    }
-  }
-
-  console.log(`🎯 Smart Assignment: ${selectedKeys.length} keys selected for ${requiredCount} operations`);
+  console.log(`🎯 Initial Assignment: ${selectedKeys.length} active keys selected (need ${requiredCount}, have ${activeKeys.length} active)`);
   return selectedKeys;
+}
+
+// Function to get replacement key when current key fails
+async function getReplacementKey(supabase, userId, provider, failedKeysInRequest = new Set()) {
+  // Get all keys for this provider
+  const { data: allKeys } = await supabase
+    .from('api_keys')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('provider', provider)
+    .order('last_used', { ascending: true, nullsFirst: true });
+
+  if (!allKeys || allKeys.length === 0) {
+    throw new Error(`No API keys found for provider: ${provider}`);
+  }
+
+  // Separate keys by priority and filter out keys that failed in current request
+  const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
+  const rateLimitedKeys = allKeys.filter(key => key.status === 'rate_limited' && !failedKeysInRequest.has(key.id));
+  const failedKeys = allKeys.filter(key => key.status === 'failed' && !failedKeysInRequest.has(key.id));
+
+  console.log(`🔄 Replacement Key Search: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed available`);
+
+  // Priority 1: Try to get another ACTIVE key
+  if (activeKeys.length > 0) {
+    const replacementKey = activeKeys[0]; // Get least recently used active key
+    console.log(`✅ Found replacement: Active key ${replacementKey.key_name}`);
+    return replacementKey;
+  }
+
+  // Priority 2: Try RATE_LIMITED key (least recently used)
+  if (rateLimitedKeys.length > 0) {
+    const sortedRateLimitedKeys = rateLimitedKeys.sort((a, b) => {
+      const aLastUsed = a.last_used ? new Date(a.last_used).getTime() : 0;
+      const bLastUsed = b.last_used ? new Date(b.last_used).getTime() : 0;
+      return aLastUsed - bLastUsed; // Least recently used first
+    });
+    const replacementKey = sortedRateLimitedKeys[0];
+    console.log(`⚠️ Found replacement: Rate-limited key ${replacementKey.key_name}`);
+    return replacementKey;
+  }
+
+  // Priority 3: Try FAILED key (least recently used)
+  if (failedKeys.length > 0) {
+    const sortedFailedKeys = failedKeys.sort((a, b) => {
+      const aLastUsed = a.last_used ? new Date(a.last_used).getTime() : 0;
+      const bLastUsed = b.last_used ? new Date(b.last_used).getTime() : 0;
+      return aLastUsed - bLastUsed; // Least recently used first
+    });
+    const replacementKey = sortedFailedKeys[0];
+    console.log(`🔴 Found replacement: Failed key ${replacementKey.key_name}`);
+    return replacementKey;
+  }
+
+  throw new Error('No replacement keys available');
 }
 
 // Test a single API key and update its status
@@ -536,6 +544,9 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
   const startTime = Date.now();
   const requestId = uuidv4();
   
+  // Track keys that failed during this request to prevent reuse
+  const failedKeysInRequest = new Set();
+  
   try {
     const { 
       mainKeyword,
@@ -691,15 +702,11 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       status: 'pending'
     });
 
-    // 🚀 IMPROVED: Use the new smart key assignment system with timeout protection
+    // 🚀 IMPROVED: Use the new smart key assignment system
     console.log(`🔍 Looking for API keys for user: ${req.user.id}`);
     
-    // Add request-level timeout protection
-    const REQUEST_TIMEOUT = 300000; // 5 minutes total
-    const requestStartTime = Date.now();
-    
     // Get all keys with smart priority-based selection
-    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1);
+    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1, failedKeysInRequest);
     
     if (!selectedKeys || selectedKeys.length === 0) {
       console.log(`❌ No API keys found for user ${req.user.id}`);
@@ -736,82 +743,76 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const results = {};
     const usedKeys = [testResult.key.id];
 
-    // 🚀 NEW: Helper function to execute module with smart key rotation and timeout protection
+    // Helper function to execute module with smart key rotation, cooldown, and replacement
     const executeModule = async (moduleName, messages, model, options = {}) => {
-      // Check if we've exceeded request timeout
-      if (Date.now() - requestStartTime > REQUEST_TIMEOUT) {
-        throw new Error('Request timeout exceeded - all keys may be failed');
-      }
-
       try {
         console.log(`🔄 Executing ${moduleName} with API key: ${testResult.key.key_name}`);
         
         const result = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
           
-        // Update key usage
-        await supabase.from('api_keys').update({
-          last_used: new Date().toISOString(),
-          failure_count: 0,
-          status: 'active'
+          // Update key usage
+          await supabase.from('api_keys').update({
+            last_used: new Date().toISOString(),
+            failure_count: 0,
+            status: 'active'
         }).eq('id', testResult.key.id);
 
-        console.log(`✅ ${moduleName} completed successfully`);
-        return result;
+          console.log(`✅ ${moduleName} completed successfully`);
+          return result;
           
-      } catch (error) {
+        } catch (error) {
         console.error(`❌ Error in ${moduleName} with API key ${testResult.key.key_name}:`, error.message);
           
-        // Check if it's a rate limit, credit issue, or invalid key
-        const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+          // Add this key to failed keys set to prevent reuse in this request
+          failedKeysInRequest.add(testResult.key.id);
           
-        if (isRateLimit) {
-          await supabase.from('api_keys').update({
-            status: 'rate_limited',
-            last_failed: new Date().toISOString(),
+          // Check if it's a rate limit, credit issue, or invalid key
+          const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+          
+          if (isRateLimit) {
+            await supabase.from('api_keys').update({
+              status: 'rate_limited',
+              last_failed: new Date().toISOString(),
             failure_count: testResult.key.failure_count + 1
           }).eq('id', testResult.key.id);
           console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
-        } else {
+          } else {
           // For all other errors, mark as failed
-          await supabase.from('api_keys').update({
-            status: 'failed',
-            last_failed: new Date().toISOString(),
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString(),
             failure_count: testResult.key.failure_count + 1
           }).eq('id', testResult.key.id);
           console.log(`⚠️ Marked API key as failed: ${testResult.key.key_name} (${testResult.key.failure_count + 1} failures)`);
         }
 
-        // 🚀 NEW: Try to get a different key if current one fails
+        // Try to get a replacement key and retry the operation
         try {
-          const alternativeKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1);
-          if (alternativeKeys.length > 0 && alternativeKeys[0].id !== testResult.key.id) {
-            console.log(`🔄 Trying alternative key: ${alternativeKeys[0].key_name}`);
+          console.log(`🔄 Attempting to get replacement key for ${moduleName}...`);
+          const replacementKey = await getReplacementKey(supabase, req.user.id, 'openrouter', failedKeysInRequest);
+          
+          if (replacementKey) {
+            console.log(`🔄 Retrying ${moduleName} with replacement key: ${replacementKey.key_name}`);
             
-            // Test the alternative key
-            const altTestResult = await testAndUpdateApiKey(supabase, alternativeKeys[0]);
-            if (altTestResult.success) {
-              console.log(`✅ Alternative key works! Using: ${altTestResult.key.key_name}`);
-              
-              // Update the current key reference
-              const altOpenrouterApiKey = altTestResult.key.api_key;
-              usedKeys.push(altTestResult.key.id);
-              
-              // Try the operation again with the alternative key
-              const altResult = await callOpenRouterAPI(messages, model, altOpenrouterApiKey, 0, options);
-              
-              // Update alternative key usage
-              await supabase.from('api_keys').update({
-                last_used: new Date().toISOString(),
-                failure_count: 0,
-                status: 'active'
-              }).eq('id', altTestResult.key.id);
-              
-              console.log(`✅ ${moduleName} completed successfully with alternative key`);
-              return altResult;
-            }
+            // Update the current key reference
+            testResult.key = replacementKey;
+            openrouterApiKey = replacementKey.api_key;
+            
+            // Retry the operation with the replacement key
+            const retryResult = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
+            
+            // Update replacement key usage
+            await supabase.from('api_keys').update({
+              last_used: new Date().toISOString(),
+              failure_count: 0,
+              status: 'active'
+            }).eq('id', replacementKey.id);
+            
+            console.log(`✅ ${moduleName} completed successfully with replacement key`);
+            return retryResult;
           }
-        } catch (altError) {
-          console.log(`⚠️ Alternative key attempt failed: ${altError.message}`);
+        } catch (replacementError) {
+          console.log(`⚠️ Could not get replacement key: ${replacementError.message}`);
         }
 
         throw error;
@@ -1196,7 +1197,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
   }
 });
 
-// Background article generation endpoint with smart key rotation
+// Background article generation endpoint
 app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware, async (req, res) => {
   const { requestId } = req.body;
   
@@ -1208,10 +1209,6 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
   res.json({ status: 'processing', requestId });
 
   try {
-    // Add request-level timeout protection
-    const REQUEST_TIMEOUT = 300000; // 5 minutes total
-    const requestStartTime = Date.now();
-
     // Update status to generating
     await supabase
       .from('article_requests')
@@ -1248,18 +1245,10 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
       models
     } = requestData;
 
-    // 🚀 NEW: Check if we have working API keys before starting
-    try {
-      const selectedKeys = await getSmartKeyAssignment(supabase, requestData.user_id, 'openrouter', 1);
-      console.log(`🔑 Background generation: Found ${selectedKeys.length} keys for user ${requestData.user_id}`);
-    } catch (keyError) {
-      throw new Error(`API key issue: ${keyError.message}`);
-    }
-
     // Update progress
-    await supabase
+            await supabase
       .from('article_requests')
-      .update({ 
+              .update({ 
         current_step: 'Generating metadata and structure',
         progress_percentage: 20
       })
@@ -1321,7 +1310,7 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     await supabase
       .from('article_requests')
       .update({ 
-        status: 'completed',
+      status: 'completed',
         current_step: 'Generation completed successfully',
         progress_percentage: 100,
         completed_at: new Date().toISOString()
@@ -1337,7 +1326,7 @@ app.post('/api/generate-article-background', rateLimitMiddleware, authMiddleware
     await supabase
       .from('article_requests')
       .update({ 
-        status: 'failed',
+      status: 'failed',
         current_step: 'Generation failed',
         error_message: error.message
       })
