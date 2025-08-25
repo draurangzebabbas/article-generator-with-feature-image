@@ -1,4 +1,4 @@
-//Key labeling
+//Key rotation and fall back models
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -94,10 +94,18 @@ export const rateLimitMiddleware = async (req, res, next) => {
 const OPENROUTER_REFERER = process.env.OPENROUTER_REFERER || 'https://your-app.com';
 const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
+// Model fallback system with priority order
+const MODEL_FALLBACKS = [
+  'deepseek/deepseek-r1-0528:free',
+  'deepseek/deepseek-chat-v3-0324:free', 
+  'deepseek/deepseek-r1:free',
+  'google/gemini-2.0-flash-exp:free'
+];
+
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
 // Priority-based initial assignment (active → rate_limited → failed) with runtime replacement system and request-level cooldown
 
-// Smart key assignment - Priority-based initial assignment with runtime replacement for failures
+// Smart key assignment - Round-robin active keys first, then fallback with LRU priority
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
   // Get all keys for this provider
   const { data: allKeys } = await supabase
@@ -111,44 +119,67 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
     throw new Error(`No API keys found for provider: ${provider}`);
   }
 
+  // Key cooldown system - prevent immediate reuse of failed keys
+  const COOLDOWN_MINUTES = 5;
+  const now = new Date();
+  
   // Separate keys by priority and filter out keys that failed in current request
   const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
-  const rateLimitedKeys = allKeys.filter(key => key.status === 'rate_limited' && !failedKeysInRequest.has(key.id));
-  const failedKeys = allKeys.filter(key => key.status === 'failed' && !failedKeysInRequest.has(key.id));
+  const rateLimitedKeys = allKeys.filter(key => {
+    if (key.status === 'rate_limited' && !failedKeysInRequest.has(key.id)) {
+      // Check if cooldown period has passed
+      if (key.last_failed) {
+        const lastFailedTime = new Date(key.last_failed);
+        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
+        return cooldownExpired;
+      }
+      return true; // No last_failed time, can use
+    }
+    return false;
+  });
+  const failedKeys = allKeys.filter(key => {
+    if (key.status === 'failed' && !failedKeysInRequest.has(key.id)) {
+      // Check if cooldown period has passed
+      if (key.last_failed) {
+        const lastFailedTime = new Date(key.last_failed);
+        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
+        return cooldownExpired;
+      }
+      return true; // No last_failed time, can use
+    }
+    return false;
+  });
 
   console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed (excluding ${failedKeysInRequest.size} failed in current request)`);
 
-  // 🚀 PRIORITY-BASED INITIAL ASSIGNMENT: active → rate_limited → failed
-  let selectedKeys = [];
-  let keyIndex = 0;
-  
-  // Priority 1: Try to get ACTIVE keys first
+  // 🚀 ROUND-ROBIN ACTIVE KEYS FIRST (LRU order)
   if (activeKeys.length > 0) {
+    let selectedKeys = [];
+    // Round-robin through active keys (LRU first)
     for (let i = 0; i < Math.min(requiredCount, activeKeys.length); i++) {
-      selectedKeys.push(activeKeys[keyIndex % activeKeys.length]);
-      keyIndex++;
+      selectedKeys.push(activeKeys[i]); // Already sorted by LRU
     }
-    console.log(`🎯 Initial Assignment: ${selectedKeys.length} ACTIVE keys selected (need ${requiredCount}, have ${activeKeys.length} active)`);
+    console.log(`🎯 Initial Assignment: ${selectedKeys.length} ACTIVE keys selected in LRU order (need ${requiredCount}, have ${activeKeys.length} active)`);
     return selectedKeys;
   }
   
-  // Priority 2: If no active keys, try RATE_LIMITED keys
+  // ⚠️ FALLBACK: If no active keys, try RATE_LIMITED keys (LRU order)
   if (rateLimitedKeys.length > 0) {
+    let selectedKeys = [];
     for (let i = 0; i < Math.min(requiredCount, rateLimitedKeys.length); i++) {
-      selectedKeys.push(rateLimitedKeys[keyIndex % rateLimitedKeys.length]);
-      keyIndex++;
+      selectedKeys.push(rateLimitedKeys[i]); // Already sorted by LRU
     }
-    console.log(`⚠️ Initial Assignment: ${selectedKeys.length} RATE_LIMITED keys selected (need ${requiredCount}, have ${rateLimitedKeys.length} rate_limited, no active available)`);
+    console.log(`⚠️ Fallback Assignment: ${selectedKeys.length} RATE_LIMITED keys selected in LRU order (need ${requiredCount}, have ${rateLimitedKeys.length} rate_limited, no active available)`);
     return selectedKeys;
   }
   
-  // Priority 3: If no active or rate_limited keys, try FAILED keys
+  // 🔴 LAST RESORT: If no active or rate_limited keys, try FAILED keys (LRU order)
   if (failedKeys.length > 0) {
+    let selectedKeys = [];
     for (let i = 0; i < Math.min(requiredCount, failedKeys.length); i++) {
-      selectedKeys.push(failedKeys[keyIndex % failedKeys.length]);
-      keyIndex++;
+      selectedKeys.push(failedKeys[i]); // Already sorted by LRU
     }
-    console.log(`🔴 Initial Assignment: ${selectedKeys.length} FAILED keys selected (need ${requiredCount}, have ${failedKeys.length} failed, no active/rate_limited available)`);
+    console.log(`🔴 Last Resort Assignment: ${selectedKeys.length} FAILED keys selected in LRU order (need ${requiredCount}, have ${failedKeys.length} failed, no active/rate_limited available)`);
     return selectedKeys;
   }
 
@@ -157,8 +188,8 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
   return [];
 }
 
-// Function to get replacement key when current key fails
-async function getReplacementKey(supabase, userId, provider, failedKeysInRequest = new Set()) {
+// Function to get replacement key when current key fails (prioritizes newly activated keys)
+async function getReplacementKey(supabase, userId, provider, failedKeysInRequest = new Set(), recentlyActivatedKeys = new Set()) {
   // Get all keys for this provider
   const { data: allKeys } = await supabase
     .from('api_keys')
@@ -178,33 +209,32 @@ async function getReplacementKey(supabase, userId, provider, failedKeysInRequest
 
   console.log(`🔄 Replacement Key Search: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed available`);
 
-  // Priority 1: Try to get another ACTIVE key
-  if (activeKeys.length > 0) {
-    const replacementKey = activeKeys[0]; // Get least recently used active key
+  // 🚀 PRIORITY 1: Recently activated keys (highest priority)
+  const recentlyActivated = activeKeys.filter(key => recentlyActivatedKeys.has(key.id));
+  if (recentlyActivated.length > 0) {
+    const replacementKey = recentlyActivated[0]; // Get least recently used recently activated key
+    console.log(`🚀 Found replacement: Recently activated key ${replacementKey.key_name} (highest priority)`);
+    return replacementKey;
+  }
+
+  // ✅ PRIORITY 2: Other active keys (least recently used first)
+  const otherActiveKeys = activeKeys.filter(key => !recentlyActivatedKeys.has(key.id));
+  if (otherActiveKeys.length > 0) {
+    const replacementKey = otherActiveKeys[0]; // Already sorted by LRU
     console.log(`✅ Found replacement: Active key ${replacementKey.key_name}`);
     return replacementKey;
   }
 
-  // Priority 2: Try RATE_LIMITED key (least recently used)
+  // ⚠️ PRIORITY 3: Rate-limited keys (least recently used first)
   if (rateLimitedKeys.length > 0) {
-    const sortedRateLimitedKeys = rateLimitedKeys.sort((a, b) => {
-      const aLastUsed = a.last_used ? new Date(a.last_used).getTime() : 0;
-      const bLastUsed = b.last_used ? new Date(b.last_used).getTime() : 0;
-      return aLastUsed - bLastUsed; // Least recently used first
-    });
-    const replacementKey = sortedRateLimitedKeys[0];
+    const replacementKey = rateLimitedKeys[0]; // Already sorted by LRU
     console.log(`⚠️ Found replacement: Rate-limited key ${replacementKey.key_name}`);
     return replacementKey;
   }
 
-  // Priority 3: Try FAILED key (least recently used)
+  // 🔴 PRIORITY 4: Failed keys (least recently used first)
   if (failedKeys.length > 0) {
-    const sortedFailedKeys = failedKeys.sort((a, b) => {
-      const aLastUsed = a.last_used ? new Date(a.last_used).getTime() : 0;
-      const bLastUsed = b.last_used ? new Date(b.last_used).getTime() : 0;
-      return aLastUsed - bLastUsed; // Least recently used first
-    });
-    const replacementKey = sortedFailedKeys[0];
+    const replacementKey = failedKeys[0]; // Already sorted by LRU
     console.log(`🔴 Found replacement: Failed key ${replacementKey.key_name}`);
     return replacementKey;
   }
@@ -276,7 +306,7 @@ async function testAndUpdateApiKey(supabase, key) {
   }
 }
 
-// Function to call OpenRouter API with smart key rotation
+// Function to call OpenRouter API with smart key rotation and model fallbacks
 async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, options = {}) {
   const { timeoutMs = 45000, maxTokens = 4000 } = options;
   const maxRetries = 1;
@@ -310,7 +340,14 @@ async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, option
       if (response.status === 401) {
         throw new Error('Invalid API key');
       } else if (response.status === 429) {
-        throw new Error('Rate limited - please try again later');
+        // Check if we can try with a different model
+        if (retryCount < MODEL_FALLBACKS.length - 1) {
+          const nextModel = MODEL_FALLBACKS[retryCount + 1];
+          console.log(`🔄 Model ${model} rate limited, trying fallback: ${nextModel}`);
+          throw new Error(`Model rate limited - trying fallback: ${nextModel}`);
+        } else {
+          throw new Error('Rate limited - please try again later');
+        }
       } else if (response.status === 402) {
         throw new Error('Insufficient credits');
       } else {
@@ -337,6 +374,15 @@ async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, option
   } catch (error) {
     console.error(`❌ Error with OpenRouter API:`, error.message);
     
+    // Handle model fallback for rate limiting
+    if (error.message.includes('Model rate limited') && retryCount < MODEL_FALLBACKS.length - 1) {
+      const nextModel = MODEL_FALLBACKS[retryCount + 1];
+      console.log(`🔄 Retrying with fallback model: ${nextModel} (attempt ${retryCount + 1}/${MODEL_FALLBACKS.length})`);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before model fallback
+      return callOpenRouterAPI(messages, nextModel, apiKey, retryCount + 1, options);
+    }
+    
+    // Handle regular retries for other errors
     if (retryCount < maxRetries) {
       console.log(`🔄 Retrying OpenRouter API call (attempt ${retryCount + 1}/${maxRetries})`);
       await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
@@ -347,6 +393,49 @@ async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, option
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// Function to find the best available model (with fallback support)
+async function findBestAvailableModel(apiKey, messages, options = {}) {
+  for (let i = 0; i < MODEL_FALLBACKS.length; i++) {
+    const model = MODEL_FALLBACKS[i];
+    try {
+      console.log(`🧪 Testing model: ${model}`);
+      
+      const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': OPENROUTER_REFERER,
+          'X-Title': OPENROUTER_TITLE
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [{ role: 'user', content: 'Test' }],
+          max_tokens: 10
+        })
+      });
+
+      if (testResponse.ok) {
+        console.log(`✅ Model ${model} is available`);
+        return model;
+      } else if (testResponse.status === 429) {
+        console.log(`⏳ Model ${model} is rate limited, trying next...`);
+        continue;
+      } else {
+        console.log(`❌ Model ${model} failed with status ${testResponse.status}`);
+        continue;
+      }
+    } catch (error) {
+      console.log(`❌ Model ${model} test failed: ${error.message}`);
+      continue;
+    }
+  }
+  
+  // If all models fail, return the first one as fallback
+  console.log(`⚠️ All models failed, using fallback: ${MODEL_FALLBACKS[0]}`);
+  return MODEL_FALLBACKS[0];
 }
 
 // Function to parse JSON safely
@@ -765,11 +854,16 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       console.log(`⚠️ Selected key failed test, but continuing with generation`);
     } else {
       console.log(`✅ Selected key passed test and is marked as active`);
+      // Track this key as recently activated if it passed the test
+      if (testResult.key.status === 'active') {
+        recentlyActivatedKeys.add(testResult.key.id);
+      }
     }
 
     let openrouterApiKey = testResult.key.api_key;  // Changed from const to let
     const results = {};
     const usedKeys = [testResult.key.id];
+    let workingKey = null; // Track the last working key to reuse
 
     // Helper function to execute module with smart key rotation, cooldown, and replacement
     const executeModule = async (moduleName, messages, model, options = {}) => {
@@ -785,7 +879,9 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             status: 'active'
         }).eq('id', testResult.key.id);
 
-          console.log(`✅ ${moduleName} completed successfully`);
+          // Track this key as recently activated
+          recentlyActivatedKeys.add(testResult.key.id);
+          console.log(`✅ ${moduleName} completed successfully - key ${testResult.key.key_name} marked as active`);
           return result;
           
         } catch (error) {
@@ -796,28 +892,36 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           
           // Check if it's a rate limit, credit issue, or invalid key
           const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+          const isInvalidKey = error.message.includes('Invalid API key') || error.message.includes('401');
           
           if (isRateLimit) {
             await supabase.from('api_keys').update({
               status: 'rate_limited',
               last_failed: new Date().toISOString(),
-            failure_count: testResult.key.failure_count + 1
-          }).eq('id', testResult.key.id);
-          console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
-          } else {
-          // For all other errors, mark as failed
+              failure_count: (testResult.key.failure_count || 0) + 1
+            }).eq('id', testResult.key.id);
+            console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
+          } else if (isInvalidKey) {
             await supabase.from('api_keys').update({
               status: 'failed',
               last_failed: new Date().toISOString(),
-            failure_count: testResult.key.failure_count + 1
-          }).eq('id', testResult.key.id);
-          console.log(`⚠️ Marked API key as failed: ${testResult.key.key_name} (${testResult.key.failure_count + 1} failures)`);
-        }
+              failure_count: (testResult.key.failure_count || 0) + 1
+            }).eq('id', testResult.key.id);
+            console.log(`❌ Marked API key as failed (invalid): ${testResult.key.key_name}`);
+          } else {
+            // For all other errors, mark as failed
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString(),
+              failure_count: (testResult.key.failure_count || 0) + 1
+            }).eq('id', testResult.key.id);
+            console.log(`❌ Marked API key as failed (other error): ${testResult.key.key_name} (${(testResult.key.failure_count || 0) + 1} failures)`);
+          }
 
         // Try to get a replacement key and retry the operation
         try {
           console.log(`🔄 Attempting to get replacement key for ${moduleName}...`);
-          const replacementKey = await getReplacementKey(supabase, req.user.id, 'openrouter', failedKeysInRequest);
+          const replacementKey = await getReplacementKey(supabase, req.user.id, 'openrouter', failedKeysInRequest, recentlyActivatedKeys);
           
           if (replacementKey) {
             console.log(`🔄 Retrying ${moduleName} with replacement key: ${replacementKey.key_name}`);
@@ -836,7 +940,9 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
               status: 'active'
             }).eq('id', replacementKey.id);
             
-            console.log(`✅ ${moduleName} completed successfully with replacement key`);
+            // Track this replacement key as recently activated
+            recentlyActivatedKeys.add(replacementKey.id);
+            console.log(`✅ ${moduleName} completed successfully with replacement key ${replacementKey.key_name} - now marked as active`);
             return retryResult;
           }
         } catch (replacementError) {
@@ -849,6 +955,11 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
 
     // Step 1: Meta & Toc Generator
     console.log(`🚀 Starting Meta & Toc Generator for keyword: ${sanitizedMainKeyword}`);
+    
+    // Find the best available model for this key
+    const bestModel = await findBestAvailableModel(openrouterApiKey, [], { maxTokens: 3000 });
+    console.log(`🎯 Using best available model: ${bestModel}`);
+    
     const metaGeneratorMessages = [
       {
         role: "system",
@@ -864,7 +975,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       }
     ];
 
-    const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, models.metaGenerator, { maxTokens: 3000 });
+    const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, bestModel, { maxTokens: 3000 });
     const metaData = safeParseJSON(metaResult);
     
     if (!metaData) {
