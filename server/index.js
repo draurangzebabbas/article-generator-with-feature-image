@@ -1,4 +1,3 @@
-//Remove Testing Of Fallback Models
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -823,6 +822,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const results = {};
     const usedKeys = [testResult.key.id];
     let workingKey = null; // Track the last working key to reuse
+    const recentlyActivatedKeys = new Set(); // Track keys that become active during generation
 
     // Helper function to execute module with smart key rotation, cooldown, and replacement
     const executeModule = async (moduleName, messages, model, options = {}) => {
