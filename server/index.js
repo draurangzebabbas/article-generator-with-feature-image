@@ -1,4 +1,4 @@
-//I Check for my calculatorscollection work great
+//Specialised relevent prompts for all images
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -629,8 +629,8 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       guidelines,
       generateImage = false,
       imagePrompt = '',
-      imageWidth = 1200,
-      imageHeight = 630,
+      imageWidth = 12000,
+      imageHeight = 6300,
       createTool = true,
       competitorResearch = false,
       imageCount = 1,
@@ -662,10 +662,17 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     const sanitizedGuidelines = guidelines ? String(guidelines).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim() : '';
     const sanitizedGenerateImage = Boolean(generateImage);
     const sanitizedImagePrompt = imagePrompt ? String(imagePrompt).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim() : '';
-    const widthNum = Number.isFinite(Number(imageWidth)) ? Number(imageWidth) : 1200;
-    const heightNum = Number.isFinite(Number(imageHeight)) ? Number(imageHeight) : 630;
-    const finalImageWidth = widthNum > 0 ? widthNum : 1200;
-    const finalImageHeight = heightNum > 0 ? heightNum : 630;
+    
+    // Process image dimensions: multiply user input by 100 for high resolution
+    const widthNum = Number.isFinite(Number(imageWidth)) ? Number(imageWidth) : 12000;
+    const heightNum = Number.isFinite(Number(imageHeight)) ? Number(imageHeight) : 6300;
+    
+    // If user provided custom dimensions, multiply by 100 for high resolution
+    const userProvidedWidth = req.body.imageWidth !== undefined && req.body.imageWidth !== 12000;
+    const userProvidedHeight = req.body.imageHeight !== undefined && req.body.imageHeight !== 6300;
+    
+    const finalImageWidth = userProvidedWidth ? widthNum * 100 : widthNum;
+    const finalImageHeight = userProvidedHeight ? heightNum * 100 : heightNum;
     const sanitizedCreateTool = Boolean(createTool);
     const sanitizedCompetitorResearch = Boolean(competitorResearch);
     const sanitizedImageCountRaw = Number.isFinite(Number(imageCount)) ? Number(imageCount) : 1;
@@ -992,49 +999,123 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     let imagePlacement = [];
     if (sanitizedGenerateImage) {
       try {
+        // Generate multiple relevant image prompts based on article content
+        const imagePrompts = [];
+        
         if (sanitizedImagePrompt) {
-          featureImagePrompt = sanitizedImagePrompt;
-        } else {
-          const imagePromptMessages = [
-            {
-              role: 'system',
-              content: "You are an expert visual prompt engineer for AI image models. Create ONE single-line, highly detailed prompt for a blog hero feature image for the given article. Requirements: modern, clean, web-ready, high-contrast, brand-safe; centered subject with copy-safe negative space; balanced lighting; aspect ratio 1200x630; UHD quality; include scene, subject, mood, lighting, color palette, camera/lens, post-processing. Avoid any text, watermarks, or logos. Return only the prompt, no quotes, no extra text."
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                main_keyword: sanitizedMainKeyword,
-                title: metaData.title,
-                excerpt: metaData.excerpt,
-                section_1_headings: metaData.headings?.section_1 || [],
-                section_2_headings: metaData.headings?.section_2 || []
-              })
+          // User provided a custom prompt - use it for the first image
+          imagePrompts.push(sanitizedImagePrompt);
+          
+          // Generate additional prompts based on article content
+          for (let i = 1; i < sanitizedImageCount; i++) {
+            const additionalPromptMessages = [
+              {
+                role: 'system',
+                content: `You are an expert visual prompt engineer for AI image models. Create ONE single-line, highly detailed prompt for a blog content image that complements the main article. This is image ${i + 1} of ${sanitizedImageCount}. Requirements: modern, clean, web-ready, high-contrast, brand-safe; centered subject with copy-safe negative space; balanced lighting; aspect ratio ${finalImageWidth}x${finalImageHeight}; UHD quality; include scene, subject, mood, lighting, color palette, camera/lens, post-processing. Avoid any text, watermarks, or logos. Return only the prompt, no quotes, no extra text.`
+              },
+              {
+                role: 'user',
+                content: JSON.stringify({
+                  main_keyword: sanitizedMainKeyword,
+                  title: metaData.title,
+                  excerpt: metaData.excerpt,
+                  section_1_headings: metaData.headings?.section_1 || [],
+                  section_2_headings: metaData.headings?.section_2 || [],
+                  image_number: i + 1,
+                  total_images: sanitizedImageCount,
+                  context: `This image should complement the article content and provide visual variety while maintaining relevance to the topic.`
+                })
+              }
+            ];
+            
+            try {
+              const additionalPrompt = await executeModule(`Additional Image Prompt ${i + 1}`, additionalPromptMessages, models.metaGenerator, { maxTokens: 300 });
+              if (additionalPrompt && additionalPrompt.trim()) {
+                imagePrompts.push(additionalPrompt.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Additional image prompt ${i + 1} generation failed:`, e?.message);
+              // Fallback: create a variation of the main prompt
+              const fallbackPrompt = `${sanitizedImagePrompt} - alternative view ${i + 1}`;
+              imagePrompts.push(fallbackPrompt);
             }
-          ];
-          const generated = await executeModule('Feature Image Prompt', imagePromptMessages, models.metaGenerator, { maxTokens: 300 });
-          featureImagePrompt = (generated || '').trim();
+          }
+        } else {
+          // Generate all prompts based on article content
+          for (let i = 0; i < sanitizedImageCount; i++) {
+            const isMainImage = i === 0;
+            const promptMessages = [
+              {
+                role: 'system',
+                content: `You are an expert visual prompt engineer for AI image models. Create ONE single-line, highly detailed prompt for a blog ${isMainImage ? 'hero feature' : 'content'} image for the given article. This is image ${i + 1} of ${sanitizedImageCount}. Requirements: modern, clean, web-ready, high-contrast, brand-safe; centered subject with copy-safe negative space; balanced lighting; aspect ratio ${finalImageWidth}x${finalImageHeight}; UHD quality; include scene, subject, mood, lighting, color palette, camera/lens, post-processing. Avoid any text, watermarks, or logos. Return only the prompt, no quotes, no extra text.`
+              },
+              {
+                role: 'user',
+                content: JSON.stringify({
+                  main_keyword: sanitizedMainKeyword,
+                  title: metaData.title,
+                  excerpt: metaData.excerpt,
+                  section_1_headings: metaData.headings?.section_1 || [],
+                  section_2_headings: metaData.headings?.section_2 || [],
+                  image_number: i + 1,
+                  total_images: sanitizedImageCount,
+                  image_purpose: isMainImage ? 'hero feature image' : 'content illustration',
+                  context: isMainImage 
+                    ? 'This is the main hero image that should represent the article topic prominently.'
+                    : `This is content image ${i + 1} that should complement the article and provide visual variety while maintaining relevance.`
+                })
+              }
+            ];
+            
+            try {
+              const generated = await executeModule(`Image Prompt ${i + 1}`, promptMessages, models.metaGenerator, { maxTokens: 300 });
+              if (generated && generated.trim()) {
+                imagePrompts.push(generated.trim());
+              } else {
+                // Fallback prompt if generation fails
+                const fallbackPrompt = `${sanitizedMainKeyword} - professional ${isMainImage ? 'hero' : 'content'} image ${i + 1}`;
+                imagePrompts.push(fallbackPrompt);
+              }
+            } catch (e) {
+              console.log(`⚠️ Image prompt ${i + 1} generation failed:`, e?.message);
+              // Fallback prompt
+              const fallbackPrompt = `${sanitizedMainKeyword} - professional ${isMainImage ? 'hero' : 'content'} image ${i + 1}`;
+              imagePrompts.push(fallbackPrompt);
+            }
+          }
         }
         
-        // Build N image URLs with varied seed for diversity (using base64 encoding for security)
+        // Ensure we have the right number of prompts
+        while (imagePrompts.length < sanitizedImageCount) {
+          const fallbackPrompt = `${sanitizedMainKeyword} - professional content image ${imagePrompts.length + 1}`;
+          imagePrompts.push(fallbackPrompt);
+        }
+        
+        // Set the main feature image prompt (first one)
+        featureImagePrompt = imagePrompts[0] || '';
+        
+        // Build image URLs with different prompts for variety
         for (let i = 0; i < sanitizedImageCount; i++) {
+          const prompt = imagePrompts[i] || featureImagePrompt;
           const seed = Math.floor(Math.random() * 1e9);
+          
           // Use base64 encoding to hide the prompt from URL
-          // Add fallback for Buffer compatibility
           let encoded;
           try {
             if (typeof Buffer !== 'undefined') {
-              encoded = Buffer.from(featureImagePrompt, 'utf8').toString('base64');
+              encoded = Buffer.from(prompt, 'utf8').toString('base64');
             } else {
               // Fallback for environments where Buffer is not available
-              encoded = btoa(unescape(encodeURIComponent(featureImagePrompt)));
+              encoded = btoa(unescape(encodeURIComponent(prompt)));
             }
           } catch (bufferError) {
             console.warn('⚠️ Buffer encoding failed, using fallback:', bufferError.message);
             // Simple fallback encoding
-            encoded = encodeURIComponent(featureImagePrompt).replace(/[!'()*]/g, function(c) {
+            encoded = encodeURIComponent(prompt).replace(/[!'()*]/g, function(c) {
               return '%' + c.charCodeAt(0).toString(16);
             });
           }
+          
           const url = `https://image.pollinations.ai/prompt/${encoded}?width=${finalImageWidth}&height=${finalImageHeight}&seed=${seed}&nologo=true`;
           featureImageUrls.push(url);
         }
@@ -1046,7 +1127,8 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           imagePlacement.push({
             type: 'featured',
             url: featureImageUrls[0],
-            position: 0
+            position: 0,
+            prompt: imagePrompts[0]
           });
           
           // Place additional images after every 2 headings
@@ -1054,12 +1136,15 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             imagePlacement.push({
               type: 'content',
               url: featureImageUrls[i],
-              position: i * 2 // After every 2 headings
+              position: i * 2, // After every 2 headings
+              prompt: imagePrompts[i]
             });
           }
         }
+        
         featureImageUrl = featureImageUrls[0] || '';
         console.log('🖼️ Feature image(s) prepared:', featureImageUrls.length);
+        console.log('📝 Image prompts generated:', imagePrompts.map((p, i) => `Image ${i + 1}: ${p.substring(0, 100)}...`));
       } catch (e) {
         console.log('⚠️ Feature image prompt generation failed:', e?.message);
       }
@@ -1248,6 +1333,8 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       feature_image_prompt: featureImagePrompt,
       feature_image_url: featureImageUrl,
       feature_image_urls: featureImageUrls,
+      image_prompts: imagePlacement.map(placement => placement.prompt), // Add image prompts
+      image_placement: imagePlacement, // Add full image placement data
       image_width: sanitizedGenerateImage ? finalImageWidth : undefined,
       image_height: sanitizedGenerateImage ? finalImageHeight : undefined,
       image_count: sanitizedGenerateImage ? sanitizedImageCount : undefined,
