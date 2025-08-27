@@ -1,4 +1,4 @@
-//content as context for image geenration
+//complete article output parameter
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -465,8 +465,8 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
     `;
   }
   
-  // Add tool if available
-  if (toolResult) {
+  // Add validated tool if available
+  if (toolResult && toolResult.trim()) {
     article += `
       <section class="tool-section">
         <h2 class="section-title">Interactive Tool</h2>
@@ -478,7 +478,7 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
   }
   
   // Add guide if available
-  if (guideResult) {
+  if (guideResult && guideResult.trim()) {
     article += `
       <section class="guide-section">
         <h2 class="section-title">How to Use</h2>
@@ -489,59 +489,72 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
     `;
   }
   
-  // Add section 1
-  article += `
-    <section class="content-section">
-      <h2 class="section-title">Main Content</h2>
-      <div class="section-content">
-        ${section1Result}
-      </div>
-    </section>
-  `;
-  
-  // Add content image after section 1 if available
-  if (imagePlacement) {
-    const contentImage1 = imagePlacement.find(img => img.type === 'content' && img.position === 2);
-    if (contentImage1) {
-      article += `
-        <div class="content-image">
-          <img src="${contentImage1.url}" alt="Content illustration" class="w-full h-auto rounded-lg shadow-md" />
+  // Add section 1 content
+  if (section1Result && section1Result.trim()) {
+    article += `
+      <section class="content-section">
+        <div class="section-content">
+          ${section1Result}
         </div>
-      `;
+      </section>
+    `;
+    
+    // Add content image after section 1 if available
+    if (imagePlacement) {
+      const contentImage1 = imagePlacement.find(img => img.type === 'content' && img.position === 2);
+      if (contentImage1) {
+        article += `
+          <div class="content-image">
+            <img src="${contentImage1.url}" alt="Content illustration" class="w-full h-auto rounded-lg shadow-md" />
+          </div>
+        `;
+      }
     }
   }
   
-  // Add section 2
-  article += `
-    <section class="content-section">
-      <h2 class="section-title">Additional Information</h2>
-      <div class="section-content">
-        ${section2Result}
-      </div>
-    </section>
-  `;
-  
-  // Add content image after section 2 if available
-  if (imagePlacement) {
-    const contentImage2 = imagePlacement.find(img => img.type === 'content' && img.position === 4);
-    if (contentImage2) {
-      article += `
-        <div class="content-image">
-          <img src="${contentImage2.url}" alt="Content illustration" class="w-full h-auto rounded-lg shadow-md" />
+  // Add section 2 content
+  if (section2Result && section2Result.trim()) {
+    article += `
+      <section class="content-section">
+        <div class="section-content">
+          ${section2Result}
         </div>
-      `;
+      </section>
+    `;
+    
+    // Add content image after section 2 if available
+    if (imagePlacement) {
+      const contentImage2 = imagePlacement.find(img => img.type === 'content' && img.position === 4);
+      if (contentImage2) {
+        article += `
+          <div class="content-image">
+            <img src="${contentImage2.url}" alt="Content illustration" class="w-full h-auto rounded-lg shadow-md" />
+          </div>
+        `;
+      }
     }
   }
   
-  // Add FAQ
-  article += `
-    <section class="faq-section">
-      <h2 class="section-title">Frequently Asked Questions</h2>
-      <div class="faq-content">
-        ${faqResult}
+  // Add FAQ if available
+  if (faqResult && faqResult.trim()) {
+    article += `
+      <section class="faq-section">
+        <h2 class="section-title">Frequently Asked Questions</h2>
+        <div class="faq-content">
+          ${faqResult}
+        </div>
+      </section>
+    `;
+  }
+  
+  // Add note about image placement if there are multiple images
+  if (imagePlacement && imagePlacement.length > 1) {
+    article += `
+      <div class="image-note">
+        <p><strong>Note:</strong> All ${imagePlacement.length} generated images have been strategically placed throughout the article according to our content optimization logic. The first image serves as the featured image, while additional images are distributed throughout the content for optimal user engagement.</p>
       </div>
-    </section>
-  `;
+    `;
+  }
   
   // Add CSS styles for better presentation
   article += `
@@ -598,6 +611,18 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
       .tool-section, .guide-section, .content-section, .faq-section {
         margin-bottom: 3rem;
       }
+      .image-note {
+        margin: 2rem 0;
+        padding: 1rem;
+        background-color: #f7fafc;
+        border-left: 4px solid #4299e1;
+        border-radius: 4px;
+      }
+      .image-note p {
+        margin: 0;
+        color: #2d3748;
+        font-size: 0.95rem;
+      }
       p {
         margin-bottom: 1rem;
       }
@@ -613,6 +638,50 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
       }
       em {
         font-style: italic;
+      }
+      h2, h3, h4, h5, h6 {
+        margin: 1.5rem 0 1rem 0;
+        color: #2d3748;
+      }
+      h2 {
+        font-size: 1.75rem;
+        font-weight: 600;
+        border-bottom: 2px solid #e2e8f0;
+        padding-bottom: 0.5rem;
+      }
+      h3 {
+        font-size: 1.5rem;
+        font-weight: 600;
+      }
+      h4 {
+        font-size: 1.25rem;
+        font-weight: 600;
+      }
+      blockquote {
+        margin: 1.5rem 0;
+        padding: 1rem 1.5rem;
+        background-color: #f7fafc;
+        border-left: 4px solid #4299e1;
+        border-radius: 4px;
+        font-style: italic;
+      }
+      code {
+        background-color: #f7fafc;
+        padding: 0.2rem 0.4rem;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.9rem;
+      }
+      pre {
+        background-color: #f7fafc;
+        padding: 1rem;
+        border-radius: 4px;
+        overflow-x: auto;
+        margin: 1.5rem 0;
+      }
+      pre code {
+        background: none;
+        padding: 0;
       }
     </style>
   `;
@@ -1481,6 +1550,18 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       title: metaData.title,
       content_length: flatResponse.complete_article.length
     });
+    
+    // Log what's included in the complete article
+    console.log(`📝 Complete Article Structure:`);
+    console.log(`  - Title: ${metaData.title || sanitizedMainKeyword}`);
+    console.log(`  - Excerpt: ${metaData.excerpt || ''}`);
+    console.log(`  - Tool: ${branchAResults.validatedToolResult ? '✅ Included' : '❌ Not included'}`);
+    console.log(`  - Guide: ${branchAResults.guideResult ? '✅ Included' : '❌ Not included'}`);
+    console.log(`  - Section 1: ${section1Result ? '✅ Included' : '❌ Not included'}`);
+    console.log(`  - Section 2: ${section2Result ? '✅ Included' : '❌ Not included'}`);
+    console.log(`  - FAQ: ${faqResult ? '✅ Included' : '❌ Not included'}`);
+    console.log(`  - Images: ${imagePlacement && imagePlacement.length > 0 ? `✅ ${imagePlacement.length} images` : '❌ No images'}`);
+    console.log(`  - Total HTML length: ${flatResponse.complete_article.length} characters`);
 
     // Final validation: ensure the response is valid JSON
     try {
