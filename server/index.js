@@ -1,4 +1,4 @@
-//Specialised relevent prompts for all images
+//content as context for image geenration
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -415,11 +415,19 @@ function safeParseJSON(jsonString) {
       .replace(/\v/g, ' ') // Replace vertical tabs with spaces
       .trim(); // Remove leading/trailing whitespace
 
-    // Try to extract JSON if it's wrapped in markdown or other formatting
-    const jsonMatch = cleanedString.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      cleanedString = jsonMatch[0];
+    // Remove markdown code blocks (```json, ```, etc.)
+    cleanedString = cleanedString.replace(/```(?:json)?\s*/g, '').replace(/```\s*$/g, '');
+    
+    // Remove any text before the first { and after the last }
+    const firstBraceIndex = cleanedString.indexOf('{');
+    const lastBraceIndex = cleanedString.lastIndexOf('}');
+    
+    if (firstBraceIndex === -1 || lastBraceIndex === -1) {
+      console.error('❌ No JSON braces found in string');
+      return null;
     }
+    
+    cleanedString = cleanedString.substring(firstBraceIndex, lastBraceIndex + 1);
 
     // Additional safety check for common JSON issues
     if (!cleanedString.startsWith('{') || !cleanedString.endsWith('}')) {
@@ -965,16 +973,43 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       },
       {
         role: "system",
-        content: "You give output in valid json just just inside {}\n\ndo not append like ```json\n\ndo not give invalid json\nall things should only inside {}\nnot even dot or comma outside{}"
+        content: "CRITICAL: Return ONLY a valid JSON object. Do NOT use markdown formatting, code blocks, or any text outside the JSON braces.\n\n- NO ```json\n- NO ```\n- NO text before or after the JSON\n- ONLY the JSON object starting with { and ending with }\n- Ensure the JSON is properly formatted and valid\n\nExample of CORRECT output:\n{\"title\": \"Example Title\", \"excerpt\": \"Example excerpt\"}\n\nExample of INCORRECT output:\n```json\n{\"title\": \"Example Title\"}\n```\n\nReturn ONLY the JSON object, nothing else."
       }
     ];
 
     const metaResult = await executeModule('Meta & Toc Generator', metaGeneratorMessages, defaultModel, { maxTokens: 3000 });
-    const metaData = safeParseJSON(metaResult);
+    
+    // Debug logging for JSON parsing
+    console.log('🔍 Meta & Toc Generator raw result (first 200 chars):', metaResult.substring(0, 200));
+    console.log('🔍 Meta & Toc Generator raw result (last 200 chars):', metaResult.substring(Math.max(0, metaResult.length - 200)));
+    
+    let metaData = safeParseJSON(metaResult);
     
     if (!metaData) {
-      console.error('❌ Meta & Toc Generator returned invalid JSON:', metaResult);
-      throw new Error('Failed to parse Meta & Toc Generator result - invalid JSON format');
+      console.error('❌ Meta & Toc Generator returned invalid JSON');
+      console.error('❌ Raw result length:', metaResult.length);
+      console.error('❌ Raw result (first 500 chars):', metaResult.substring(0, 500));
+      console.error('❌ Raw result (last 500 chars):', metaResult.substring(Math.max(0, metaResult.length - 500)));
+      
+      // Try to manually extract JSON as a last resort
+      console.log('🔄 Attempting manual JSON extraction...');
+      const manualExtraction = metaResult.replace(/```(?:json)?\s*/g, '').replace(/```\s*$/g, '');
+      const firstBrace = manualExtraction.indexOf('{');
+      const lastBrace = manualExtraction.lastIndexOf('}');
+      
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        const extractedJson = manualExtraction.substring(firstBrace, lastBrace + 1);
+        try {
+          const manualParsed = JSON.parse(extractedJson);
+          console.log('✅ Manual JSON extraction successful');
+          metaData = manualParsed;
+        } catch (manualError) {
+          console.error('❌ Manual JSON extraction also failed:', manualError.message);
+          throw new Error('Failed to parse Meta & Toc Generator result - invalid JSON format');
+        }
+      } else {
+        throw new Error('Failed to parse Meta & Toc Generator result - invalid JSON format');
+      }
     }
     
     // Validate required fields
@@ -1002,6 +1037,18 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         // Generate multiple relevant image prompts based on article content
         const imagePrompts = [];
         
+        // Create context-aware prompts based on article content
+        const createContextualPrompt = (isMainImage, sectionIndex) => {
+          if (isMainImage) {
+            // For main image, use title and main keyword
+            return `Professional hero photograph of ${sanitizedMainKeyword}, ${metaData.title.toLowerCase()}, modern kitchen setting, natural lighting, warm color palette, wide angle, professional food photography style, high contrast, web-ready`;
+          } else {
+            // For content images, use specific section headings
+            const sectionHeading = metaData.headings?.section_1?.[sectionIndex] || metaData.headings?.section_2?.[sectionIndex - (metaData.headings?.section_1?.length || 0)] || 'article content';
+            return `Professional content photograph of ${sanitizedMainKeyword} ${sectionHeading}, modern kitchen setting, natural lighting, warm color palette, close-up angle, professional food photography style, high contrast, web-ready`;
+          }
+        };
+        
         if (sanitizedImagePrompt) {
           // User provided a custom prompt - use it for the first image
           imagePrompts.push(sanitizedImagePrompt);
@@ -1011,7 +1058,32 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             const additionalPromptMessages = [
               {
                 role: 'system',
-                content: `You are an expert visual prompt engineer for AI image models. Create ONE single-line, highly detailed prompt for a blog content image that complements the main article. This is image ${i + 1} of ${sanitizedImageCount}. Requirements: modern, clean, web-ready, high-contrast, brand-safe; centered subject with copy-safe negative space; balanced lighting; aspect ratio ${finalImageWidth}x${finalImageHeight}; UHD quality; include scene, subject, mood, lighting, color palette, camera/lens, post-processing. Avoid any text, watermarks, or logos. Return only the prompt, no quotes, no extra text.`
+                content: `You are an expert visual prompt engineer for AI image models. Your task is to create a highly specific, contextually relevant image prompt based on the article content.
+
+CRITICAL REQUIREMENTS:
+1. The image MUST be directly related to the specific section content and headings
+2. Use the exact keywords and concepts from the article sections
+3. Create a prompt that would generate an image that perfectly illustrates the article topic
+4. Be specific about the subject, setting, and context - not generic
+
+CONTEXT ANALYSIS:
+- Main keyword: ${sanitizedMainKeyword}
+- Article title: ${metaData.title}
+- This image will illustrate: ${metaData.headings?.section_1?.[i-1] || 'article content'}
+- Related keywords: ${sanitizedRelatedKeywords?.slice(0, 5).join(', ')}
+
+IMAGE REQUIREMENTS:
+- Modern, clean, web-ready, high-contrast, brand-safe
+- Centered subject with copy-safe negative space
+- Balanced lighting, aspect ratio ${finalImageWidth}x${finalImageHeight}
+- UHD quality, professional photography style
+- Include: scene, subject, mood, lighting, color palette, camera angle
+- NO text, watermarks, or logos
+
+EXAMPLE FORMAT:
+"Professional close-up photograph of [specific subject related to the heading], [specific setting/context], [lighting style], [color palette], [camera angle], [mood/atmosphere]"
+
+Return ONLY the prompt, no quotes, no extra text.`
               },
               {
                 role: 'user',
@@ -1023,7 +1095,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
                   section_2_headings: metaData.headings?.section_2 || [],
                   image_number: i + 1,
                   total_images: sanitizedImageCount,
-                  context: `This image should complement the article content and provide visual variety while maintaining relevance to the topic.`
+                  context: `This image should illustrate the specific section: "${metaData.headings?.section_1?.[i-1] || 'article content'}". The image must be directly related to this section's content and help readers visualize the concepts discussed.`
                 })
               }
             ];
@@ -1035,8 +1107,8 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
               }
             } catch (e) {
               console.log(`⚠️ Additional image prompt ${i + 1} generation failed:`, e?.message);
-              // Fallback: create a variation of the main prompt
-              const fallbackPrompt = `${sanitizedImagePrompt} - alternative view ${i + 1}`;
+              // Fallback: create a variation of the main prompt with context
+              const fallbackPrompt = createContextualPrompt(false, i);
               imagePrompts.push(fallbackPrompt);
             }
           }
@@ -1047,7 +1119,32 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             const promptMessages = [
               {
                 role: 'system',
-                content: `You are an expert visual prompt engineer for AI image models. Create ONE single-line, highly detailed prompt for a blog ${isMainImage ? 'hero feature' : 'content'} image for the given article. This is image ${i + 1} of ${sanitizedImageCount}. Requirements: modern, clean, web-ready, high-contrast, brand-safe; centered subject with copy-safe negative space; balanced lighting; aspect ratio ${finalImageWidth}x${finalImageHeight}; UHD quality; include scene, subject, mood, lighting, color palette, camera/lens, post-processing. Avoid any text, watermarks, or logos. Return only the prompt, no quotes, no extra text.`
+                content: `You are an expert visual prompt engineer for AI image models. Your task is to create a highly specific, contextually relevant image prompt based on the article content.
+
+CRITICAL REQUIREMENTS:
+1. The image MUST be directly related to the specific section content and headings
+2. Use the exact keywords and concepts from the article sections
+3. Create a prompt that would generate an image that perfectly illustrates the article topic
+4. Be specific about the subject, setting, and context - not generic
+
+CONTEXT ANALYSIS:
+- Main keyword: ${sanitizedMainKeyword}
+- Article title: ${metaData.title}
+- This image will illustrate: ${isMainImage ? 'main article topic' : metaData.headings?.section_1?.[i-1] || 'article content'}
+- Related keywords: ${sanitizedRelatedKeywords?.slice(0, 5).join(', ')}
+
+IMAGE REQUIREMENTS:
+- Modern, clean, web-ready, high-contrast, brand-safe
+- Centered subject with copy-safe negative space
+- Balanced lighting, aspect ratio ${finalImageWidth}x${finalImageHeight}
+- UHD quality, professional photography style
+- Include: scene, subject, mood, lighting, color palette, camera angle
+- NO text, watermarks, or logos
+
+EXAMPLE FORMAT:
+"Professional ${isMainImage ? 'hero' : 'content'} photograph of [specific subject related to the heading], [specific setting/context], [lighting style], [color palette], [camera angle], [mood/atmosphere]"
+
+Return ONLY the prompt, no quotes, no extra text.`
               },
               {
                 role: 'user',
@@ -1061,8 +1158,8 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
                   total_images: sanitizedImageCount,
                   image_purpose: isMainImage ? 'hero feature image' : 'content illustration',
                   context: isMainImage 
-                    ? 'This is the main hero image that should represent the article topic prominently.'
-                    : `This is content image ${i + 1} that should complement the article and provide visual variety while maintaining relevance.`
+                    ? `This is the main hero image that should represent the article topic: "${metaData.title}". It should be the most compelling and relevant image for the main keyword "${sanitizedMainKeyword}".`
+                    : `This is content image ${i + 1} that should illustrate the specific section: "${metaData.headings?.section_1?.[i-1] || 'article content'}". The image must directly relate to this section's content.`
                 })
               }
             ];
@@ -1072,14 +1169,14 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
               if (generated && generated.trim()) {
                 imagePrompts.push(generated.trim());
               } else {
-                // Fallback prompt if generation fails
-                const fallbackPrompt = `${sanitizedMainKeyword} - professional ${isMainImage ? 'hero' : 'content'} image ${i + 1}`;
+                // Fallback prompt if generation fails - use contextual prompt
+                const fallbackPrompt = createContextualPrompt(isMainImage, i);
                 imagePrompts.push(fallbackPrompt);
               }
             } catch (e) {
               console.log(`⚠️ Image prompt ${i + 1} generation failed:`, e?.message);
-              // Fallback prompt
-              const fallbackPrompt = `${sanitizedMainKeyword} - professional ${isMainImage ? 'hero' : 'content'} image ${i + 1}`;
+              // Fallback prompt - use contextual prompt
+              const fallbackPrompt = createContextualPrompt(isMainImage, i);
               imagePrompts.push(fallbackPrompt);
             }
           }
@@ -1087,7 +1184,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         
         // Ensure we have the right number of prompts
         while (imagePrompts.length < sanitizedImageCount) {
-          const fallbackPrompt = `${sanitizedMainKeyword} - professional content image ${imagePrompts.length + 1}`;
+          const fallbackPrompt = createContextualPrompt(false, imagePrompts.length);
           imagePrompts.push(fallbackPrompt);
         }
         
@@ -1144,7 +1241,11 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         
         featureImageUrl = featureImageUrls[0] || '';
         console.log('🖼️ Feature image(s) prepared:', featureImageUrls.length);
-        console.log('📝 Image prompts generated:', imagePrompts.map((p, i) => `Image ${i + 1}: ${p.substring(0, 100)}...`));
+        console.log('📝 Image prompts generated:');
+        imagePrompts.forEach((prompt, i) => {
+          console.log(`  Image ${i + 1}: ${prompt}`);
+        });
+        console.log('🔗 Image URLs generated:', featureImageUrls.length);
       } catch (e) {
         console.log('⚠️ Feature image prompt generation failed:', e?.message);
       }
@@ -1265,7 +1366,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       const faqGeneratorMessages = [
         {
           role: "system",
-          content: "You are an expert SEO content writer specialized in generating clear, concise, and accurate FAQ answers based on the main keyword, related keywords, and a list of FAQ questions.\n\nInstructions:\n- For each FAQ question, provide a direct, factual, and concise answer in **1 to 2 sentences**.\n- Then add a second paragraph with **brief contextual explanation (max 100 words)**.\n- Use the related keywords naturally to enhance relevance without keyword stuffing.\n- Format each FAQ as:\n  `<h3>Question?</h3>`  \n  `<p>Answer sentence(s). Context sentence(s).</p>`\n- Do NOT include any extra text, explanation, or formatting outside these tags.\n- Avoid repeating content or vague answers.\n- Maintain a professional, simple, and clear tone.\n\n-No markdown, no wrapping containers, no headings, no summaries — just raw HTML content per section"
+          content: "You are an expert SEO content writer specialized in generating clear, concise, and accurate FAQ answers based on the main keyword, related keywords, and a list of FAQ questions.\n\nInstructions:\n- For each FAQ question, provide a direct, factual, and concise answer in **1 to 2 sentences**.\n- Then add a second paragraph with **brief contextual explanation (max 100 words)**.\n- Use the related keywords naturally to enhance relevance without keyword stuffing.\n- Format each FAQ as:\n  `<h3>Question?</h3>`  \n  `<p>Answer sentence(s). Context sentence(s).</p>`\n- Do NOT include any extra text, explanation, or formatting outside these tags.\n- Avoid repeating content or vague answers.\n- Maintain a professional, simple, and clear tone.\n\nCRITICAL: Return ONLY valid HTML content. Do NOT use markdown formatting, code blocks, or any text outside the HTML tags.\n\n- No markdown, no wrapping containers, no headings, no summaries — just raw HTML content per section"
         },
         {
           role: "user",
