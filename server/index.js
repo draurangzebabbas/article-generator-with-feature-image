@@ -1,4 +1,4 @@
-//Automatic Key recovery
+//Round robin for batch and operations
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -105,8 +105,10 @@ const MODEL_FALLBACKS = [
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
 // Priority-based initial assignment (active → rate_limited → failed) with runtime replacement system and request-level cooldown
 
-// Smart key assignment - Round-robin active keys first, then fallback with LRU priority
+// Smart key assignment - True Round-Robin with intelligent key recovery
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
+  console.log(`🔍 Smart Key Assignment: Need ${requiredCount} keys for user ${userId}`);
+  
   // Get all keys for this provider
   const { data: allKeys } = await supabase
     .from('api_keys')
@@ -163,40 +165,85 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
 
   console.log(`🔑 Key Inventory: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed (excluding ${failedKeysInRequest.size} failed in current request)`);
 
-  // 🚀 ROUND-ROBIN ACTIVE KEYS FIRST (LRU order)
-  if (activeKeys.length > 0) {
-    let selectedKeys = [];
-    // Round-robin through active keys (LRU first)
-    for (let i = 0; i < Math.min(requiredCount, activeKeys.length); i++) {
-      selectedKeys.push(activeKeys[i]); // Already sorted by LRU
-    }
-    console.log(`🎯 Initial Assignment: ${selectedKeys.length} ACTIVE keys selected in LRU order (need ${requiredCount}, have ${activeKeys.length} active)`);
-    return selectedKeys;
-  }
-  
-  // ⚠️ FALLBACK: If no active keys, try RATE_LIMITED keys (LRU order)
-  if (rateLimitedKeys.length > 0) {
-    let selectedKeys = [];
-    for (let i = 0; i < Math.min(requiredCount, rateLimitedKeys.length); i++) {
-      selectedKeys.push(rateLimitedKeys[i]); // Already sorted by LRU
-    }
-    console.log(`⚠️ Fallback Assignment: ${selectedKeys.length} RATE_LIMITED keys selected in LRU order (need ${requiredCount}, have ${rateLimitedKeys.length} rate_limited, no active available)`);
-    return selectedKeys;
-  }
-  
-  // 🔴 LAST RESORT: If no active or rate_limited keys, try FAILED keys (LRU order)
-  if (failedKeys.length > 0) {
-    let selectedKeys = [];
-    for (let i = 0; i < Math.min(requiredCount, failedKeys.length); i++) {
-      selectedKeys.push(failedKeys[i]); // Already sorted by LRU
-    }
-    console.log(`🔴 Last Resort Assignment: ${selectedKeys.length} FAILED keys selected in LRU order (need ${requiredCount}, have ${failedKeys.length} failed, no active/rate_limited available)`);
+  // 🎯 STRATEGY: If we have enough active keys, use them directly
+  if (activeKeys.length >= requiredCount) {
+    console.log(`✅ SUFFICIENT ACTIVE KEYS: ${activeKeys.length} active >= ${requiredCount} needed`);
+    console.log(`🔄 Using Round-Robin distribution across ${activeKeys.length} active keys`);
+    
+    // Return keys in LRU order for round-robin distribution
+    const selectedKeys = activeKeys.slice(0, requiredCount);
+    console.log(`🎯 Round-Robin Assignment: ${selectedKeys.length} ACTIVE keys selected for distribution`);
     return selectedKeys;
   }
 
-  // If we get here, no keys are available at all
-  console.log(`❌ No keys available for initial assignment`);
-  return [];
+  // ⚠️ INSUFFICIENT ACTIVE KEYS: Need to test and recover keys first
+  console.log(`⚠️ INSUFFICIENT ACTIVE KEYS: ${activeKeys.length} active < ${requiredCount} needed`);
+  console.log(`🔄 Testing rate-limited and failed keys to increase active pool...`);
+
+  // 🔍 PHASE 1: Test rate-limited keys first (higher priority)
+  let recoveredKeys = [];
+  if (rateLimitedKeys.length > 0) {
+    console.log(`🧪 Testing ${rateLimitedKeys.length} rate-limited keys for recovery...`);
+    
+    for (const key of rateLimitedKeys) {
+      try {
+        const testResult = await testAndUpdateApiKey(supabase, key);
+        if (testResult.success && testResult.key.status === 'active') {
+          recoveredKeys.push(testResult.key);
+          console.log(`✅ Recovered rate-limited key: ${key.key_name}`);
+        }
+      } catch (error) {
+        console.log(`❌ Rate-limited key test failed: ${key.key_name} (${error.message})`);
+      }
+    }
+  }
+
+  // 🔍 PHASE 2: Test failed keys if we still need more
+  if (recoveredKeys.length + activeKeys.length < requiredCount && failedKeys.length > 0) {
+    console.log(`🧪 Testing ${failedKeys.length} failed keys for recovery...`);
+    
+    for (const key of failedKeys) {
+      try {
+        const testResult = await testAndUpdateApiKey(supabase, key);
+        if (testResult.success && testResult.key.status === 'active') {
+          recoveredKeys.push(testResult.key);
+          console.log(`✅ Recovered failed key: ${key.key_name}`);
+          
+          // Stop if we have enough keys now
+          if (recoveredKeys.length + activeKeys.length >= requiredCount) {
+            break;
+          }
+        }
+      } catch (error) {
+        console.log(`❌ Failed key test failed: ${key.key_name} (${error.message})`);
+      }
+    }
+  }
+
+  // 🔄 PHASE 3: Combine all available keys and distribute
+  const allAvailableKeys = [...activeKeys, ...recoveredKeys];
+  console.log(`🔑 Final Key Pool: ${allAvailableKeys.length} total available (${activeKeys.length} original + ${recoveredKeys.length} recovered)`);
+
+  if (allAvailableKeys.length >= requiredCount) {
+    // We have enough keys now - distribute them
+    const selectedKeys = allAvailableKeys.slice(0, requiredCount);
+    console.log(`🎯 SUCCESS: ${selectedKeys.length} keys selected for Round-Robin distribution`);
+    console.log(`🔄 Keys will be distributed across ${requiredCount} operations`);
+    return selectedKeys;
+  } else {
+    // Still not enough keys - use what we have with fallback
+    console.log(`⚠️ WARNING: Only ${allAvailableKeys.length} keys available for ${requiredCount} operations`);
+    console.log(`🔄 Will reuse keys across operations (not ideal but necessary)`);
+    
+    // If we have some keys, use them
+    if (allAvailableKeys.length > 0) {
+      return allAvailableKeys;
+    }
+    
+    // No keys available at all
+    console.log(`❌ No keys available for assignment`);
+    return [];
+  }
 }
 
 // Function to get replacement key when current key fails (prioritizes newly activated keys)
@@ -961,8 +1008,11 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     // Track keys that become active during generation
     const recentlyActivatedKeys = new Set();
     
-    // Get all keys with smart priority-based selection
-    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', 1, failedKeysInRequest);
+    // 🚀 IMPROVED: Get keys for ALL operations (7 total) with Round-Robin distribution
+    const TOTAL_OPERATIONS = 7; // Meta & Toc, Tool, Tool Validator, Guide, Section 1, Section 2, FAQ
+    console.log(`🎯 Need ${TOTAL_OPERATIONS} keys for Round-Robin distribution across all operations`);
+    
+    const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', TOTAL_OPERATIONS, failedKeysInRequest);
     
     if (!selectedKeys || selectedKeys.length === 0) {
       console.log(`❌ No API keys available for user ${req.user.id}`);
@@ -988,23 +1038,51 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     }
 
     console.log(`🔑 Found ${selectedKeys.length} OpenRouter API keys for user ${req.user.id}`);
-
-    // Test and update the selected key status
-    const testResult = await testAndUpdateApiKey(supabase, selectedKeys[0]);
-    if (!testResult.success) {
-      console.log(`⚠️ Selected key failed test, but continuing with generation`);
+    
+    if (selectedKeys.length < TOTAL_OPERATIONS) {
+      console.log(`⚠️ WARNING: Only ${selectedKeys.length} keys available for ${TOTAL_OPERATIONS} operations`);
+      console.log(`🔄 Will reuse keys across operations (not ideal but necessary)`);
     } else {
-      console.log(`✅ Selected key passed test and is marked as active`);
-      // Track this key as recently activated if it passed the test
-      if (testResult.key.status === 'active') {
-        recentlyActivatedKeys.add(testResult.key.id);
+      console.log(`✅ SUCCESS: ${selectedKeys.length} keys available for ${TOTAL_OPERATIONS} operations`);
+      console.log(`🔄 Perfect Round-Robin distribution possible!`);
+    }
+
+    // Test all selected keys to ensure they're working
+    const testedKeys = [];
+    for (let i = 0; i < selectedKeys.length; i++) {
+      const key = selectedKeys[i];
+      const testResult = await testAndUpdateApiKey(supabase, key);
+      if (testResult.success) {
+        testedKeys.push(testResult.key);
+        if (testResult.key.status === 'active') {
+          recentlyActivatedKeys.add(testResult.key.id);
+        }
+        console.log(`✅ Key ${i + 1}/${selectedKeys.length}: ${key.key_name} - TEST PASSED`);
+      } else {
+        console.log(`⚠️ Key ${i + 1}/${selectedKeys.length}: ${key.key_name} - TEST FAILED, but continuing`);
+        // Still add the key even if test failed (it might work for actual operations)
+        testedKeys.push(key);
       }
     }
 
-    let openrouterApiKey = testResult.key.api_key;  // Changed from const to let
+    // Initialize key rotation index for Round-Robin distribution
+    let currentKeyIndex = 0;
     const results = {};
-    const usedKeys = [testResult.key.id];
+    const usedKeys = [];
     let workingKey = null; // Track the last working key to reuse
+
+    // 🔄 ROUND-ROBIN KEY ROTATION: Get next key for each operation
+    const getNextKey = () => {
+      if (testedKeys.length === 0) {
+        throw new Error('No keys available for rotation');
+      }
+      
+      const key = testedKeys[currentKeyIndex % testedKeys.length];
+      currentKeyIndex++;
+      
+      console.log(`🔄 Rotating to key: ${key.key_name} (operation ${currentKeyIndex}/${TOTAL_OPERATIONS})`);
+      return key;
+    };
 
     // Helper function to execute module with smart key rotation, cooldown, and replacement
     const executeModule = async (moduleName, messages, model, options = {}) => {
@@ -1075,7 +1153,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             }
           }
 
-        // Try to get a replacement key and retry the operation
+        // 🔄 IMPROVED: Try to get a replacement key and retry the operation
         try {
           console.log(`🔄 Attempting to get replacement key for ${moduleName}...`);
           const replacementKey = await getReplacementKey(supabase, req.user.id, 'openrouter', failedKeysInRequest, recentlyActivatedKeys);
@@ -1083,12 +1161,8 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           if (replacementKey) {
             console.log(`🔄 Retrying ${moduleName} with replacement key: ${replacementKey.key_name}`);
             
-            // Update the current key reference
-            testResult.key = replacementKey;
-            openrouterApiKey = replacementKey.api_key;
-            
             // Retry the operation with the replacement key
-            const retryResult = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
+            const retryResult = await callOpenRouterAPI(messages, model, replacementKey.api_key, 0, options);
             
             // Update replacement key usage and mark as active since it worked
             try {
@@ -1103,6 +1177,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
             
             // Track this replacement key as recently activated
             recentlyActivatedKeys.add(replacementKey.id);
+            usedKeys.push(replacementKey.id);
             console.log(`✅ ${moduleName} completed successfully with replacement key ${replacementKey.key_name} - now marked as active`);
             return retryResult;
           }
@@ -1211,6 +1286,10 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         // 🎯 AI-POWERED IMAGE PROMPT GENERATOR MODULE
         console.log('🎯 Starting AI-Powered Image Prompt Generator Module...');
         
+        // 🔄 ROUND-ROBIN: Get next key for image generation
+        const imageKey = getNextKey();
+        console.log(`🎯 Image Generation using key: ${imageKey.key_name}`);
+        
         // Call the AI-powered image prompt generator
         const imagePromptResult = await generateImagePrompts(
           sanitizedMainKeyword,
@@ -1220,7 +1299,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           sanitizedImagePrompt,
           finalImageWidth,
           finalImageHeight,
-          openrouterApiKey,  // Pass the API key
+          imageKey.api_key,  // Use round-robin key
           defaultModel        // Pass the model
         );
         
