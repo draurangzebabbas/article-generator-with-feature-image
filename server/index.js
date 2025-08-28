@@ -1,4 +1,4 @@
-//AI-POWERED IMAGE PROMPT GENERATION IMPLEMENTED! ✅
+//Automatic Key recovery
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -119,15 +119,17 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
     throw new Error(`No API keys found for provider: ${provider}`);
   }
 
-  // Key cooldown system - prevent immediate reuse of failed keys
-  const COOLDOWN_MINUTES = 5;
+  // 🔄 IMPROVED: Smart cooldown system that allows LRU rotation for potentially refreshed keys
+  const COOLDOWN_MINUTES = 2; // Reduced from 5 to 2 minutes for faster rotation
   const now = new Date();
   
   // Separate keys by priority and filter out keys that failed in current request
   const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
+  
+  // 🔑 RATE_LIMITED keys - check if they might have been refreshed
   const rateLimitedKeys = allKeys.filter(key => {
     if (key.status === 'rate_limited' && !failedKeysInRequest.has(key.id)) {
-      // Check if cooldown period has passed
+      // Allow rate_limited keys to be used if cooldown passed (they might have new credits)
       if (key.last_failed) {
         const lastFailedTime = new Date(key.last_failed);
         const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
@@ -137,15 +139,24 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
     }
     return false;
   });
+  
+  // 🔄 FAILED keys - implement proper LRU rotation for potentially refreshed keys
   const failedKeys = allKeys.filter(key => {
     if (key.status === 'failed' && !failedKeysInRequest.has(key.id)) {
-      // Check if cooldown period has passed
+      // 🔑 KEY INSIGHT: Failed keys might have new credits now - use LRU rotation
       if (key.last_failed) {
         const lastFailedTime = new Date(key.last_failed);
         const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
-        return cooldownExpired;
+        
+        // If cooldown expired, this key could work now (new credits, rate limit reset, etc.)
+        if (cooldownExpired) {
+          console.log(`🔄 Key ${key.key_name} cooldown expired - may have new credits/rate limit reset`);
+          return true;
+        }
+      } else {
+        // No last_failed time, can use
+        return true;
       }
-      return true; // No last_failed time, can use
     }
     return false;
   });
@@ -202,10 +213,47 @@ async function getReplacementKey(supabase, userId, provider, failedKeysInRequest
     throw new Error(`No API keys found for provider: ${provider}`);
   }
 
+  // 🔄 IMPROVED: Smart filtering that allows LRU rotation for potentially refreshed keys
+  const COOLDOWN_MINUTES = 2; // Same cooldown as main function
+  const now = new Date();
+  
   // Separate keys by priority and filter out keys that failed in current request
   const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
-  const rateLimitedKeys = allKeys.filter(key => key.status === 'rate_limited' && !failedKeysInRequest.has(key.id));
-  const failedKeys = allKeys.filter(key => key.status === 'failed' && !failedKeysInRequest.has(key.id));
+  
+  // 🔑 RATE_LIMITED keys - check if they might have been refreshed
+  const rateLimitedKeys = allKeys.filter(key => {
+    if (key.status === 'rate_limited' && !failedKeysInRequest.has(key.id)) {
+      // Allow rate_limited keys to be used if cooldown passed (they might have new credits)
+      if (key.last_failed) {
+        const lastFailedTime = new Date(key.last_failed);
+        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
+        return cooldownExpired;
+      }
+      return true; // No last_failed time, can use
+    }
+    return false;
+  });
+  
+  // 🔄 FAILED keys - implement proper LRU rotation for potentially refreshed keys
+  const failedKeys = allKeys.filter(key => {
+    if (key.status === 'failed' && !failedKeysInRequest.has(key.id)) {
+      // 🔑 KEY INSIGHT: Failed keys might have new credits now - use LRU rotation
+      if (key.last_failed) {
+        const lastFailedTime = new Date(key.last_failed);
+        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
+        
+        // If cooldown expired, this key could work now (new credits, rate limit reset, etc.)
+        if (cooldownExpired) {
+          console.log(`🔄 Replacement: Key ${key.key_name} cooldown expired - may have new credits/rate limit reset`);
+          return true;
+        }
+      } else {
+        // No last_failed time, can use
+        return true;
+      }
+    }
+    return false;
+  });
 
   console.log(`🔄 Replacement Key Search: ${activeKeys.length} active, ${rateLimitedKeys.length} rate_limited, ${failedKeys.length} failed available`);
 
@@ -232,10 +280,11 @@ async function getReplacementKey(supabase, userId, provider, failedKeysInRequest
     return replacementKey;
   }
 
-  // 🔴 PRIORITY 4: Failed keys (least recently used first)
+  // 🔴 PRIORITY 4: Failed keys (least recently used first) - IMPROVED LRU rotation
   if (failedKeys.length > 0) {
     const replacementKey = failedKeys[0]; // Already sorted by LRU
     console.log(`🔴 Found replacement: Failed key ${replacementKey.key_name}`);
+    console.log(`🔄 Using LRU rotation - this key may have new credits or rate limit reset`);
     return replacementKey;
   }
 
@@ -934,7 +983,7 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
 
       return res.status(400).json({ 
         error: 'No API keys', 
-        message: 'Please add at least one OpenRouter API key or reactivate your existing keys' 
+        message: 'All your OpenRouter API keys have hit their daily rate limits. Please add credits to your OpenRouter accounts or wait for daily reset. Adding $10 credits unlocks 1000 requests per day per key.' 
       });
     }
 
@@ -1059,6 +1108,14 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           }
         } catch (replacementError) {
           console.log(`⚠️ Could not get replacement key: ${replacementError.message}`);
+          
+          // 🔑 IMPROVED: Better error handling for exhausted keys
+          if (replacementError.message.includes('No replacement keys available')) {
+            // All keys are exhausted - provide helpful error message
+            const helpfulError = new Error('All OpenRouter API keys have hit their daily rate limits. Please add credits to your OpenRouter accounts or wait for daily reset. Adding $10 credits unlocks 1000 requests per day per key.');
+            helpfulError.name = 'API_KEYS_EXHAUSTED';
+            throw helpfulError;
+          }
         }
 
         throw error;
@@ -1898,6 +1955,71 @@ app.post('/api/recover-keys', rateLimitMiddleware, authMiddleware, async (req, r
   }
 });
 
+// 🔑 NEW: Key status check endpoint for users
+app.get('/api/keys/status', rateLimitMiddleware, authMiddleware, async (req, res) => {
+  try {
+    console.log(`🔍 Key status check requested by user: ${req.user.id}`);
+    
+    // Get all keys for this user with detailed status
+    const { data: allKeys } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('provider', 'openrouter')
+      .order('last_used', { ascending: true, nullsFirst: true });
+    
+    if (!allKeys || allKeys.length === 0) {
+      return res.json({ 
+        status: 'success', 
+        message: 'No OpenRouter API keys found',
+        keys: []
+      });
+    }
+    
+    // Calculate time until rate limit reset for failed/rate_limited keys
+    const now = new Date();
+    const keysWithResetInfo = allKeys.map(key => {
+      const keyInfo = { ...key };
+      
+      if (key.last_failed) {
+        const lastFailedTime = new Date(key.last_failed);
+        const timeSinceFailure = now - lastFailedTime;
+        const timeUntilReset = Math.max(0, (24 * 60 * 60 * 1000) - timeSinceFailure); // 24 hours
+        
+        keyInfo.time_until_reset = Math.ceil(timeUntilReset / (60 * 60 * 1000)); // Hours
+        keyInfo.can_retry_soon = timeUntilReset < (2 * 60 * 60 * 1000); // Can retry in < 2 hours
+      }
+      
+      return keyInfo;
+    });
+    
+    // Group keys by status
+    const activeKeys = keysWithResetInfo.filter(k => k.status === 'active');
+    const rateLimitedKeys = keysWithResetInfo.filter(k => k.status === 'rate_limited');
+    const failedKeys = keysWithResetInfo.filter(k => k.status === 'failed');
+    
+    res.json({ 
+      status: 'success', 
+      message: 'Key status retrieved successfully',
+      summary: {
+        total: allKeys.length,
+        active: activeKeys.length,
+        rate_limited: rateLimitedKeys.length,
+        failed: failedKeys.length
+      },
+      keys: keysWithResetInfo,
+      recommendations: {
+        add_credits: failedKeys.length > 0 ? 'Consider adding $10 credits to failed accounts to unlock 1000 requests per day' : null,
+        wait_reset: failedKeys.length > 0 ? 'Daily rate limits reset every 24 hours' : null,
+        manual_recovery: failedKeys.length > 0 ? 'Try manual recovery to test if keys have new credits' : null
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Status check failed', message: error.message });
+  }
+});
+
 // Global error handler (ensure this is last)
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
@@ -1906,6 +2028,76 @@ app.use((err, _req, res, _next) => {
     message: err?.message || 'An unexpected error occurred'
   });
 });
+
+// 🔄 PERIODIC KEY RECOVERY: Automatically check and recover failed keys
+async function periodicKeyRecovery() {
+  try {
+    console.log('🔄 Starting periodic key recovery check...');
+    
+    // Get all failed keys that haven't been checked recently
+    const { data: failedKeys } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('status', 'failed')
+      .lt('last_failed', new Date(Date.now() - 10 * 60 * 1000).toISOString()); // 10 minutes ago
+    
+    if (!failedKeys || failedKeys.length === 0) {
+      console.log('✅ No failed keys need recovery check');
+      return;
+    }
+    
+    console.log(`🔄 Found ${failedKeys.length} failed keys to check for recovery...`);
+    
+    let recovered = 0;
+    let stillFailed = 0;
+    
+    for (const key of failedKeys) {
+      try {
+        // Test the key with a simple API call
+        const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${key.api_key}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': OPENROUTER_REFERER,
+            'X-Title': OPENROUTER_TITLE
+          },
+          body: JSON.stringify({
+            model: 'deepseek/deepseek-chat-v3-0324:free',
+            messages: [{ role: 'user', content: 'Hello' }],
+            max_tokens: 10
+          })
+        });
+        
+        if (testResponse.ok) {
+          // Key recovered - mark as active
+          await supabase.from('api_keys').update({
+            status: 'active',
+            failure_count: 0,
+            last_recovered: new Date().toISOString(),
+            last_used: new Date().toISOString()
+          }).eq('id', key.id);
+          console.log(`✅ Auto-recovered key: ${key.key_name}`);
+          recovered++;
+        } else {
+          console.log(`❌ Key still failed: ${key.key_name} (${testResponse.status})`);
+          stillFailed++;
+        }
+      } catch (error) {
+        console.log(`❌ Key test failed: ${key.key_name} (${error.message})`);
+        stillFailed++;
+      }
+    }
+    
+    console.log(`🔄 Periodic recovery completed: ${recovered} recovered, ${stillFailed} still failed`);
+    
+  } catch (error) {
+    console.error('❌ Periodic key recovery failed:', error.message);
+  }
+}
+
+// Start periodic key recovery every 5 minutes
+setInterval(periodicKeyRecovery, 5 * 60 * 1000);
 
 // Ensure server listens when run directly
 const port = process.env.PORT || 3000;
@@ -1918,6 +2110,7 @@ const server = app.listen(port, () => {
   console.log(`   POST /api/generate-article-background - Background processing`);
   console.log(`   GET  /health - Health check`);
   console.log(`   GET  /api/test - API information`);
+  console.log(`🔄 Periodic key recovery started (every 5 minutes)`);
 });
 
 // Handle server errors
