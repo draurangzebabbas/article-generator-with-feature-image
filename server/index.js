@@ -1,4 +1,4 @@
-//complete article output parameter
+//FINAL VERIFICATION
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -446,21 +446,102 @@ function safeParseJSON(jsonString) {
   }
 }
 
-// Function to format complete article with proper structure and image placement
-const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1Result, section2Result, faqResult, imagePlacement) => {
-  let article = `
-    <article class="article-content">
-      <header class="article-header">
-        <h1 class="article-title">${title}</h1>
-        <p class="article-excerpt"><strong>${excerpt}</strong></p>
-      </header>
-  `;
+// 🎯 DEDICATED IMAGE PROMPT GENERATOR MODULE
+// This module takes section headings and main keyword to generate contextual image prompts
+async function generateImagePrompts(mainKeyword, title, headings, imageCount, userPrompt = null, width = 12000, height = 6300) {
+  console.log('🖼️ Image Prompt Generator Module started');
+  console.log(`📊 Input: ${imageCount} images needed, ${headings?.section_1?.length || 0} section 1 headings, ${headings?.section_2?.length || 0} section 2 headings`);
   
-  // Add featured image if available
-  if (imagePlacement && imagePlacement.length > 0 && imagePlacement[0].type === 'featured') {
+  const prompts = [];
+  let mainPrompt = '';
+  
+  try {
+    // Strategy 1: User provided custom prompt for main image
+    if (userPrompt && userPrompt.trim()) {
+      mainPrompt = userPrompt.trim();
+      prompts.push(mainPrompt);
+      console.log('✅ Using user-provided prompt for main image');
+      
+      // Generate additional prompts for remaining images
+      for (let i = 1; i < imageCount; i++) {
+        const contextualPrompt = createContextualImagePrompt(mainKeyword, headings, i, false, width, height);
+        prompts.push(contextualPrompt);
+        console.log(`✅ Generated contextual prompt ${i + 1} using section headings`);
+      }
+    } else {
+      // Strategy 2: Generate all prompts using section headings and main keyword
+      for (let i = 0; i < imageCount; i++) {
+        const isMainImage = i === 0;
+        const contextualPrompt = createContextualImagePrompt(mainKeyword, headings, i, isMainImage, width, height);
+        prompts.push(contextualPrompt);
+        console.log(`✅ Generated contextual prompt ${i + 1} (${isMainImage ? 'main' : 'content'}) using section headings`);
+      }
+      
+      mainPrompt = prompts[0] || '';
+    }
+    
+    // Ensure we have the right number of prompts
+    while (prompts.length < imageCount) {
+      const additionalPrompt = createContextualImagePrompt(mainKeyword, headings, prompts.length, false, width, height);
+      prompts.push(additionalPrompt);
+      console.log(`✅ Generated additional contextual prompt ${prompts.length}`);
+    }
+    
+    console.log(`🎯 Image Prompt Generator completed successfully: ${prompts.length} prompts created`);
+    return {
+      prompts: prompts,
+      mainPrompt: mainPrompt,
+      success: true
+    };
+    
+  } catch (error) {
+    console.error('❌ Image Prompt Generator failed:', error.message);
+    
+    // Fallback: create basic prompts using main keyword
+    console.log('🔄 Creating fallback prompts using main keyword...');
+    const fallbackPrompts = [];
+    
+    for (let i = 0; i < imageCount; i++) {
+      if (i === 0) {
+        fallbackPrompts.push(`Professional hero photograph of ${mainKeyword}, ${title.toLowerCase()}, modern setting, natural lighting, professional style, high contrast, web-ready`);
+      } else {
+        fallbackPrompts.push(`Professional content photograph of ${mainKeyword}, modern setting, natural lighting, professional style, high contrast, web-ready`);
+      }
+    }
+    
+    return {
+      prompts: fallbackPrompts,
+      mainPrompt: fallbackPrompts[0] || '',
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Helper function to create contextual image prompts based on section headings
+function createContextualImagePrompt(mainKeyword, headings, index, isMainImage, width, height) {
+  if (isMainImage) {
+    // Main image: use title and main keyword
+    return `Professional hero photograph of ${mainKeyword}, modern setting, natural lighting, warm color palette, wide angle, professional photography style, high contrast, web-ready, aspect ratio ${width}x${height}`;
+  } else {
+    // Content images: use specific section headings
+    const sectionHeading = headings?.section_1?.[index] || headings?.section_2?.[index - (headings?.section_1?.length || 0)] || 'article content';
+    return `Professional content photograph of ${mainKeyword} ${sectionHeading}, modern setting, natural lighting, warm color palette, close-up angle, professional photography style, high contrast, web-ready, aspect ratio ${width}x${height}`;
+  }
+}
+
+// Function to format complete article with proper structure and image placement
+const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1Result, section2Result, faqResult, imagePlacement, metaData) => {
+  // Ensure imagePlacement is always an array
+  const safeImagePlacement = Array.isArray(imagePlacement) ? imagePlacement : [];
+  
+  let article = '';
+  
+  // Add featured image at the top if available (only if we have a title for alt text)
+  if (safeImagePlacement.length > 0 && safeImagePlacement[0].type === 'featured' && title) {
     article += `
-      <div class="featured-image">
-        <img src="${imagePlacement[0].url}" alt="${title}" class="w-full h-auto rounded-lg shadow-lg" />
+      <div class="featured-image" style="margin: 2rem 0; text-align: center;">
+        <img src="${safeImagePlacement[0].url}" alt="${title}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);" />
       </div>
     `;
   }
@@ -468,9 +549,9 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
   // Add validated tool if available
   if (toolResult && toolResult.trim()) {
     article += `
-      <section class="tool-section">
-        <h2 class="section-title">Interactive Tool</h2>
-        <div class="tool-content">
+      <section style="margin-bottom: 3rem;">
+        <h2 style="font-size: 1.75rem; font-weight: 600; color: #2d3748; margin: 2rem 0 1rem 0; padding-bottom: 0.5rem; border-bottom: 2px solid #e2e8f0;">Interactive Tool</h2>
+        <div style="margin-bottom: 2rem;">
           ${toolResult}
         </div>
       </section>
@@ -480,67 +561,74 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
   // Add guide if available
   if (guideResult && guideResult.trim()) {
     article += `
-      <section class="guide-section">
-        <h2 class="section-title">How to Use</h2>
-        <div class="guide-content">
+      <section style="margin-bottom: 3rem;">
+        <h2 style="font-size: 1.75rem; font-weight: 600; color: #2d3748; margin: 2rem 0 1rem 0; padding-bottom: 0.5rem; border-bottom: 2px solid #e2e8f0;">How to Use</h2>
+        <div style="margin-bottom: 2rem;">
           ${guideResult}
         </div>
       </section>
     `;
   }
   
-  // Add section 1 content
+  // Add section 1 content with integrated images
   if (section1Result && section1Result.trim()) {
     article += `
-      <section class="content-section">
-        <div class="section-content">
+      <section style="margin-bottom: 3rem;">
+        <div style="margin-bottom: 2rem;">
           ${section1Result}
         </div>
       </section>
     `;
     
-    // Add content image after section 1 if available
-    if (imagePlacement) {
-      const contentImage1 = imagePlacement.find(img => img.type === 'content' && img.position === 2);
-      if (contentImage1) {
+    // Add content images that belong to section 1
+    if (safeImagePlacement.length > 0) {
+      const section1Images = safeImagePlacement.filter(img => 
+        img.type === 'content' && img.position <= (metaData?.headings?.section_1?.length || 0)
+      );
+      
+      section1Images.forEach(img => {
         article += `
-          <div class="content-image">
-            <img src="${contentImage1.url}" alt="Content illustration" class="w-full h-auto rounded-lg shadow-md" />
+          <div style="margin: 2rem 0; text-align: center;">
+            <img src="${img.url}" alt="Content illustration" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
           </div>
         `;
-      }
+      });
     }
   }
   
-  // Add section 2 content
+  // Add section 2 content with integrated images
   if (section2Result && section2Result.trim()) {
     article += `
-      <section class="content-section">
-        <div class="section-content">
+      <section style="margin-bottom: 3rem;">
+        <div style="margin-bottom: 2rem;">
           ${section2Result}
         </div>
       </section>
     `;
     
-    // Add content image after section 2 if available
-    if (imagePlacement) {
-      const contentImage2 = imagePlacement.find(img => img.type === 'content' && img.position === 4);
-      if (contentImage2) {
+    // Add content images that belong to section 2
+    if (safeImagePlacement.length > 0) {
+      const section1Length = metaData?.headings?.section_1?.length || 0;
+      const section2Images = safeImagePlacement.filter(img => 
+        img.type === 'content' && img.position > section1Length && img.position <= (section1Length + (metaData?.headings?.section_2?.length || 0))
+      );
+      
+      section2Images.forEach(img => {
         article += `
-          <div class="content-image">
-            <img src="${contentImage2.url}" alt="Content illustration" class="w-full h-auto rounded-lg shadow-md" />
+          <div style="margin: 2rem 0; text-align: center;">
+            <img src="${img.url}" alt="Content illustration" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
           </div>
         `;
-      }
+      });
     }
   }
   
   // Add FAQ if available
   if (faqResult && faqResult.trim()) {
     article += `
-      <section class="faq-section">
-        <h2 class="section-title">Frequently Asked Questions</h2>
-        <div class="faq-content">
+      <section style="margin-bottom: 3rem;">
+        <h2 style="font-size: 1.75rem; font-weight: 600; color: #2d3748; margin: 2rem 0 1rem 0; padding-bottom: 0.5rem; border-bottom: 2px solid #e2e8f0;">Frequently Asked Questions</h2>
+        <div style="margin-bottom: 2rem;">
           ${faqResult}
         </div>
       </section>
@@ -548,145 +636,14 @@ const formatCompleteArticle = (title, excerpt, toolResult, guideResult, section1
   }
   
   // Add note about image placement if there are multiple images
-  if (imagePlacement && imagePlacement.length > 1) {
+  if (safeImagePlacement.length > 1) {
     article += `
-      <div class="image-note">
-        <p><strong>Note:</strong> All ${imagePlacement.length} generated images have been strategically placed throughout the article according to our content optimization logic. The first image serves as the featured image, while additional images are distributed throughout the content for optimal user engagement.</p>
+      <div style="margin: 2rem 0; padding: 1rem; background-color: #f7fafc; border-left: 4px solid #4299e1; border-radius: 4px;">
+        <p style="margin: 0; color: #2d3748; font-size: 0.95rem;"><strong>Note:</strong> All ${safeImagePlacement.length} generated images have been strategically placed throughout the article according to our content optimization logic. The first image serves as the featured image, while additional images are distributed throughout the content for optimal user engagement.</p>
       </div>
     `;
   }
   
-  // Add CSS styles for better presentation
-  article += `
-    <style>
-      .article-content {
-        max-width: 800px;
-        margin: 0 auto;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        line-height: 1.6;
-        color: #333;
-      }
-      .article-header {
-        text-align: center;
-        margin-bottom: 2rem;
-      }
-      .article-title {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: #1a202c;
-        margin-bottom: 1rem;
-      }
-      .article-excerpt {
-        font-size: 1.25rem;
-        color: #4a5568;
-        font-style: italic;
-      }
-      .featured-image {
-        margin: 2rem 0;
-        text-align: center;
-      }
-      .featured-image img {
-        max-width: 100%;
-        height: auto;
-      }
-      .section-title {
-        font-size: 1.75rem;
-        font-weight: 600;
-        color: #2d3748;
-        margin: 2rem 0 1rem 0;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #e2e8f0;
-      }
-      .section-content, .tool-content, .guide-content, .faq-content {
-        margin-bottom: 2rem;
-      }
-      .content-image {
-        margin: 2rem 0;
-        text-align: center;
-      }
-      .content-image img {
-        max-width: 100%;
-        height: auto;
-      }
-      .tool-section, .guide-section, .content-section, .faq-section {
-        margin-bottom: 3rem;
-      }
-      .image-note {
-        margin: 2rem 0;
-        padding: 1rem;
-        background-color: #f7fafc;
-        border-left: 4px solid #4299e1;
-        border-radius: 4px;
-      }
-      .image-note p {
-        margin: 0;
-        color: #2d3748;
-        font-size: 0.95rem;
-      }
-      p {
-        margin-bottom: 1rem;
-      }
-      ul, ol {
-        margin-bottom: 1rem;
-        padding-left: 2rem;
-      }
-      li {
-        margin-bottom: 0.5rem;
-      }
-      strong {
-        font-weight: 600;
-      }
-      em {
-        font-style: italic;
-      }
-      h2, h3, h4, h5, h6 {
-        margin: 1.5rem 0 1rem 0;
-        color: #2d3748;
-      }
-      h2 {
-        font-size: 1.75rem;
-        font-weight: 600;
-        border-bottom: 2px solid #e2e8f0;
-        padding-bottom: 0.5rem;
-      }
-      h3 {
-        font-size: 1.5rem;
-        font-weight: 600;
-      }
-      h4 {
-        font-size: 1.25rem;
-        font-weight: 600;
-      }
-      blockquote {
-        margin: 1.5rem 0;
-        padding: 1rem 1.5rem;
-        background-color: #f7fafc;
-        border-left: 4px solid #4299e1;
-        border-radius: 4px;
-        font-style: italic;
-      }
-      code {
-        background-color: #f7fafc;
-        padding: 0.2rem 0.4rem;
-        border-radius: 3px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.9rem;
-      }
-      pre {
-        background-color: #f7fafc;
-        padding: 1rem;
-        border-radius: 4px;
-        overflow-x: auto;
-        margin: 1.5rem 0;
-      }
-      pre code {
-        background: none;
-        padding: 0;
-      }
-    </style>
-  `;
-  
-  article += `</article>`;
   return article;
 };
 
@@ -735,7 +692,10 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     // Sanitize inputs to prevent JSON injection and control character issues
     const sanitizedMainKeyword = String(mainKeyword).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
     const sanitizedTop10Articles = String(top10Articles).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
-    const sanitizedRelatedKeywords = String(relatedKeywords).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim();
+    // Handle relatedKeywords - convert to array if it's a string, or keep as array
+    const sanitizedRelatedKeywords = Array.isArray(relatedKeywords) 
+      ? relatedKeywords.map(kw => String(kw).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim()).filter(Boolean)
+      : String(relatedKeywords || '').replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim().split(',').map(kw => kw.trim()).filter(Boolean);
     const sanitizedGuidelines = guidelines ? String(guidelines).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim() : '';
     const sanitizedGenerateImage = Boolean(generateImage);
     const sanitizedImagePrompt = imagePrompt ? String(imagePrompt).replace(/[\x00-\x1F\x7F-\x9F]/g, '').trim() : '';
@@ -1101,164 +1061,44 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     let featureImageUrls = [];
     // Ensure imagePlacement is available regardless of generateImage flag
     let imagePlacement = [];
+    // Declare imagePrompts variable in main scope for error handling
+    let imagePrompts = [];
     if (sanitizedGenerateImage) {
       try {
         // Generate multiple relevant image prompts based on article content
-        const imagePrompts = [];
+        // imagePrompts is already declared in main scope
         
-        // Create context-aware prompts based on article content
-        const createContextualPrompt = (isMainImage, sectionIndex) => {
-          if (isMainImage) {
-            // For main image, use title and main keyword
-            return `Professional hero photograph of ${sanitizedMainKeyword}, ${metaData.title.toLowerCase()}, modern kitchen setting, natural lighting, warm color palette, wide angle, professional food photography style, high contrast, web-ready`;
-          } else {
-            // For content images, use specific section headings
-            const sectionHeading = metaData.headings?.section_1?.[sectionIndex] || metaData.headings?.section_2?.[sectionIndex - (metaData.headings?.section_1?.length || 0)] || 'article content';
-            return `Professional content photograph of ${sanitizedMainKeyword} ${sectionHeading}, modern kitchen setting, natural lighting, warm color palette, close-up angle, professional food photography style, high contrast, web-ready`;
-          }
-        };
+        // Old createContextualPrompt function removed - now using dedicated Image Prompt Generator Module
         
-        if (sanitizedImagePrompt) {
-          // User provided a custom prompt - use it for the first image
-          imagePrompts.push(sanitizedImagePrompt);
-          
-          // Generate additional prompts based on article content
-          for (let i = 1; i < sanitizedImageCount; i++) {
-            const additionalPromptMessages = [
-              {
-                role: 'system',
-                content: `You are an expert visual prompt engineer for AI image models. Your task is to create a highly specific, contextually relevant image prompt based on the article content.
-
-CRITICAL REQUIREMENTS:
-1. The image MUST be directly related to the specific section content and headings
-2. Use the exact keywords and concepts from the article sections
-3. Create a prompt that would generate an image that perfectly illustrates the article topic
-4. Be specific about the subject, setting, and context - not generic
-
-CONTEXT ANALYSIS:
-- Main keyword: ${sanitizedMainKeyword}
-- Article title: ${metaData.title}
-- This image will illustrate: ${metaData.headings?.section_1?.[i-1] || 'article content'}
-- Related keywords: ${sanitizedRelatedKeywords?.slice(0, 5).join(', ')}
-
-IMAGE REQUIREMENTS:
-- Modern, clean, web-ready, high-contrast, brand-safe
-- Centered subject with copy-safe negative space
-- Balanced lighting, aspect ratio ${finalImageWidth}x${finalImageHeight}
-- UHD quality, professional photography style
-- Include: scene, subject, mood, lighting, color palette, camera angle
-- NO text, watermarks, or logos
-
-EXAMPLE FORMAT:
-"Professional close-up photograph of [specific subject related to the heading], [specific setting/context], [lighting style], [color palette], [camera angle], [mood/atmosphere]"
-
-Return ONLY the prompt, no quotes, no extra text.`
-              },
-              {
-                role: 'user',
-                content: JSON.stringify({
-                  main_keyword: sanitizedMainKeyword,
-                  title: metaData.title,
-                  excerpt: metaData.excerpt,
-                  section_1_headings: metaData.headings?.section_1 || [],
-                  section_2_headings: metaData.headings?.section_2 || [],
-                  image_number: i + 1,
-                  total_images: sanitizedImageCount,
-                  context: `This image should illustrate the specific section: "${metaData.headings?.section_1?.[i-1] || 'article content'}". The image must be directly related to this section's content and help readers visualize the concepts discussed.`
-                })
-              }
-            ];
-            
-            try {
-              const additionalPrompt = await executeModule(`Additional Image Prompt ${i + 1}`, additionalPromptMessages, models.metaGenerator, { maxTokens: 300 });
-              if (additionalPrompt && additionalPrompt.trim()) {
-                imagePrompts.push(additionalPrompt.trim());
-              }
-            } catch (e) {
-              console.log(`⚠️ Additional image prompt ${i + 1} generation failed:`, e?.message);
-              // Fallback: create a variation of the main prompt with context
-              const fallbackPrompt = createContextualPrompt(false, i);
-              imagePrompts.push(fallbackPrompt);
-            }
-          }
-        } else {
-          // Generate all prompts based on article content
-          for (let i = 0; i < sanitizedImageCount; i++) {
-            const isMainImage = i === 0;
-            const promptMessages = [
-              {
-                role: 'system',
-                content: `You are an expert visual prompt engineer for AI image models. Your task is to create a highly specific, contextually relevant image prompt based on the article content.
-
-CRITICAL REQUIREMENTS:
-1. The image MUST be directly related to the specific section content and headings
-2. Use the exact keywords and concepts from the article sections
-3. Create a prompt that would generate an image that perfectly illustrates the article topic
-4. Be specific about the subject, setting, and context - not generic
-
-CONTEXT ANALYSIS:
-- Main keyword: ${sanitizedMainKeyword}
-- Article title: ${metaData.title}
-- This image will illustrate: ${isMainImage ? 'main article topic' : metaData.headings?.section_1?.[i-1] || 'article content'}
-- Related keywords: ${sanitizedRelatedKeywords?.slice(0, 5).join(', ')}
-
-IMAGE REQUIREMENTS:
-- Modern, clean, web-ready, high-contrast, brand-safe
-- Centered subject with copy-safe negative space
-- Balanced lighting, aspect ratio ${finalImageWidth}x${finalImageHeight}
-- UHD quality, professional photography style
-- Include: scene, subject, mood, lighting, color palette, camera angle
-- NO text, watermarks, or logos
-
-EXAMPLE FORMAT:
-"Professional ${isMainImage ? 'hero' : 'content'} photograph of [specific subject related to the heading], [specific setting/context], [lighting style], [color palette], [camera angle], [mood/atmosphere]"
-
-Return ONLY the prompt, no quotes, no extra text.`
-              },
-              {
-                role: 'user',
-                content: JSON.stringify({
-                  main_keyword: sanitizedMainKeyword,
-                  title: metaData.title,
-                  excerpt: metaData.excerpt,
-                  section_1_headings: metaData.headings?.section_1 || [],
-                  section_2_headings: metaData.headings?.section_2 || [],
-                  image_number: i + 1,
-                  total_images: sanitizedImageCount,
-                  image_purpose: isMainImage ? 'hero feature image' : 'content illustration',
-                  context: isMainImage 
-                    ? `This is the main hero image that should represent the article topic: "${metaData.title}". It should be the most compelling and relevant image for the main keyword "${sanitizedMainKeyword}".`
-                    : `This is content image ${i + 1} that should illustrate the specific section: "${metaData.headings?.section_1?.[i-1] || 'article content'}". The image must directly relate to this section's content.`
-                })
-              }
-            ];
-            
-            try {
-              const generated = await executeModule(`Image Prompt ${i + 1}`, promptMessages, models.metaGenerator, { maxTokens: 300 });
-              if (generated && generated.trim()) {
-                imagePrompts.push(generated.trim());
-              } else {
-                // Fallback prompt if generation fails - use contextual prompt
-                const fallbackPrompt = createContextualPrompt(isMainImage, i);
-                imagePrompts.push(fallbackPrompt);
-              }
-            } catch (e) {
-              console.log(`⚠️ Image prompt ${i + 1} generation failed:`, e?.message);
-              // Fallback prompt - use contextual prompt
-              const fallbackPrompt = createContextualPrompt(isMainImage, i);
-              imagePrompts.push(fallbackPrompt);
-            }
-          }
+        // 🎯 DEDICATED IMAGE PROMPT GENERATOR MODULE
+        console.log('🎯 Starting dedicated Image Prompt Generator Module...');
+        
+        // Call the dedicated image prompt generator
+        const imagePromptResult = await generateImagePrompts(
+          sanitizedMainKeyword,
+          metaData.title,
+          metaData.headings,
+          sanitizedImageCount,
+          sanitizedImagePrompt,
+          finalImageWidth,
+          finalImageHeight
+        );
+        
+        // Use the generated prompts
+        imagePrompts = imagePromptResult.prompts;
+        featureImagePrompt = imagePromptResult.mainPrompt;
+        
+        console.log(`✅ Image Prompt Generator completed: ${imagePrompts.length} prompts created`);
+        console.log('📝 Generated prompts:', imagePrompts);
+        
+        // The Image Prompt Generator Module should have already provided all needed prompts
+        if (imagePrompts.length < sanitizedImageCount) {
+          console.log(`⚠️ Image Prompt Generator provided ${imagePrompts.length} prompts but need ${sanitizedImageCount}`);
+          console.log('🔄 This should not happen with the dedicated module - checking for errors...');
         }
         
-        // Ensure we have the right number of prompts
-        while (imagePrompts.length < sanitizedImageCount) {
-          const fallbackPrompt = createContextualPrompt(false, imagePrompts.length);
-          imagePrompts.push(fallbackPrompt);
-        }
-        
-        // Set the main feature image prompt (first one)
-        featureImagePrompt = imagePrompts[0] || '';
+        // Main feature image prompt already set by Image Prompt Generator Module
+        console.log('🎯 Image Prompt Generator Module completed - all prompts generated using section headings and main keyword');
         
         // Build image URLs with different prompts for variety
         for (let i = 0; i < sanitizedImageCount; i++) {
@@ -1286,27 +1126,47 @@ Return ONLY the prompt, no quotes, no extra text.`
           featureImageUrls.push(url);
         }
         
-        // Place images strategically in the article
-        // 1st image is featured image, others are placed after every 2 headings
-        imagePlacement = [];
-        if (featureImageUrls.length > 0) {
+            // Place images strategically in the article for optimal content integration
+    // 1st image is featured image, others are placed strategically throughout content
+    imagePlacement = [];
+    if (featureImageUrls.length > 0) {
+      imagePlacement.push({
+        type: 'featured',
+        url: featureImageUrls[0],
+        position: 0,
+        prompt: imagePrompts[0]
+      });
+      
+      // Place additional images strategically throughout the content
+      // Calculate optimal positions based on content structure
+      const totalSections = (metaData.headings?.section_1?.length || 0) + (metaData.headings?.section_2?.length || 0);
+      const imagesToPlace = featureImageUrls.length - 1; // Exclude featured image
+      
+      if (imagesToPlace > 0 && totalSections > 0) {
+        // Distribute images evenly throughout the content
+        const spacing = Math.max(1, Math.floor(totalSections / (imagesToPlace + 1)));
+        
+        for (let i = 1; i < featureImageUrls.length; i++) {
+          const position = Math.min(i * spacing, totalSections);
           imagePlacement.push({
-            type: 'featured',
-            url: featureImageUrls[0],
-            position: 0,
-            prompt: imagePrompts[0]
+            type: 'content',
+            url: featureImageUrls[i],
+            position: position,
+            prompt: imagePrompts[i]
           });
-          
-          // Place additional images after every 2 headings
-          for (let i = 1; i < featureImageUrls.length; i++) {
-            imagePlacement.push({
-              type: 'content',
-              url: featureImageUrls[i],
-              position: i * 2, // After every 2 headings
-              prompt: imagePrompts[i]
-            });
-          }
         }
+      } else if (imagesToPlace > 0) {
+        // Fallback: place images after every 2 sections
+        for (let i = 1; i < featureImageUrls.length; i++) {
+          imagePlacement.push({
+            type: 'content',
+            url: featureImageUrls[i],
+            position: i * 2,
+            prompt: imagePrompts[i]
+          });
+        }
+      }
+    }
         
         featureImageUrl = featureImageUrls[0] || '';
         console.log('🖼️ Feature image(s) prepared:', featureImageUrls.length);
@@ -1317,6 +1177,24 @@ Return ONLY the prompt, no quotes, no extra text.`
         console.log('🔗 Image URLs generated:', featureImageUrls.length);
       } catch (e) {
         console.log('⚠️ Feature image prompt generation failed:', e?.message);
+        
+        // This should rarely happen now since we're using the primary contextual strategy
+        // But if it does, we'll use the basic fallback prompts
+        console.log('🔄 Using basic fallback prompts as emergency backup...');
+        
+        // Use the basic fallback prompts that were already generated
+        if (imagePrompts.length === 0) {
+          // If somehow we have no prompts, create basic ones
+          for (let i = 0; i < sanitizedImageCount; i++) {
+            if (i === 0) {
+              imagePrompts.push(`Professional hero photograph of ${sanitizedMainKeyword}, modern setting, natural lighting, professional style, high contrast, web-ready`);
+            } else {
+              imagePrompts.push(`Professional content photograph of ${sanitizedMainKeyword}, modern setting, natural lighting, professional style, high contrast, web-ready`);
+            }
+          }
+        }
+        
+        console.log('✅ Emergency fallback image generation completed');
       }
     }
 
@@ -1334,7 +1212,7 @@ Return ONLY the prompt, no quotes, no extra text.`
           role: "system",
           content: `You think about keywords below and then decide what should be in our tool to satisfy user
 Related Keywords to our main keyword 
-${sanitizedRelatedKeywords}`
+${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}`
         },
         {
           role: "user",
@@ -1376,7 +1254,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
           content: JSON.stringify({
             mainKeyword: sanitizedMainKeyword,
             toolCode: validatedToolResult,
-            related_keywords: sanitizedRelatedKeywords
+            related_keywords: Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords
           })
         }
       ];
@@ -1401,7 +1279,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
           role: "user",
           content: `- title: ${metaData.title} (not to be included in the output)
 - excerpt: ${metaData.excerpt}
- - related_keywords: ${sanitizedRelatedKeywords}`
+ - related_keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}`
         }
       ];
 
@@ -1418,7 +1296,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
           role: "user",
           content: `- section1_headings: ${JSON.stringify(metaData.headings?.section_1 || [])}
 - section2_headings: ${JSON.stringify(metaData.headings?.section_2 || [])}
- - related_keywords: ${sanitizedRelatedKeywords}`
+ - related_keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}`
         }
       ];
 
@@ -1439,7 +1317,7 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         },
         {
           role: "user",
-          content: `- related_keywords: ${sanitizedRelatedKeywords}
+          content: `- related_keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}
 - faq_questions: ${JSON.stringify(metaData.faq || [])}`
         }
       ];
@@ -1500,11 +1378,11 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       guide_generator_result: (branchAResults.guideResult ? String(branchAResults.guideResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : ''),
 
       // Feature Image (optional)
-      feature_image_prompt: featureImagePrompt,
-      feature_image_url: featureImageUrl,
-      feature_image_urls: featureImageUrls,
-      image_prompts: imagePlacement.map(placement => placement.prompt), // Add image prompts
-      image_placement: imagePlacement, // Add full image placement data
+      feature_image_prompt: featureImagePrompt || '',
+      feature_image_url: featureImageUrl || (featureImageUrls[0] || ''),
+      feature_image_urls: featureImageUrls || [],
+      image_prompts: imagePlacement && imagePlacement.length > 0 ? imagePlacement.map(placement => placement.prompt) : [],
+      image_placement: imagePlacement || [],
       image_width: sanitizedGenerateImage ? finalImageWidth : undefined,
       image_height: sanitizedGenerateImage ? finalImageHeight : undefined,
       image_count: sanitizedGenerateImage ? sanitizedImageCount : undefined,
@@ -1520,16 +1398,17 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       section_2_generator_result: section2Result ? String(section2Result).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
       faq_generator_result: faqResult ? String(faqResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
       
-      // Complete Article (combined and sanitized with proper formatting)
+      // Complete Article (body content only - ready to paste directly into WordPress post body)
       complete_article: formatCompleteArticle(
-        metaData.title || sanitizedMainKeyword,
-        metaData.excerpt || '',
+        '', // No title needed - handled separately
+        '', // No excerpt needed - handled separately
         branchAResults.validatedToolResult ? String(branchAResults.validatedToolResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
         branchAResults.guideResult ? String(branchAResults.guideResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
         section1Result ? String(section1Result).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
         section2Result ? String(section2Result).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
         faqResult ? String(faqResult).replace(/[\x00-\x1F\x7F-\x9F]/g, '') : '',
-        imagePlacement
+        imagePlacement || [],
+        metaData // Pass metaData for proper image positioning
       ),
       
       // Flags
