@@ -1,4 +1,4 @@
-//FINAL VERIFICATION
+//AI-POWERED IMAGE PROMPT GENERATION IMPLEMENTED! ✅
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -446,10 +446,10 @@ function safeParseJSON(jsonString) {
   }
 }
 
-// 🎯 DEDICATED IMAGE PROMPT GENERATOR MODULE
-// This module takes section headings and main keyword to generate contextual image prompts
-async function generateImagePrompts(mainKeyword, title, headings, imageCount, userPrompt = null, width = 12000, height = 6300) {
-  console.log('🖼️ Image Prompt Generator Module started');
+// 🎯 AI-POWERED IMAGE PROMPT GENERATOR MODULE
+// This module uses OpenRouter API to generate contextual image prompts based on section headings and main keyword
+async function generateImagePrompts(mainKeyword, title, headings, imageCount, userPrompt = null, width = 12000, height = 6300, openrouterApiKey, model) {
+  console.log('🖼️ AI-Powered Image Prompt Generator Module started');
   console.log(`📊 Input: ${imageCount} images needed, ${headings?.section_1?.length || 0} section 1 headings, ${headings?.section_2?.length || 0} section 2 headings`);
   
   const prompts = [];
@@ -462,19 +462,19 @@ async function generateImagePrompts(mainKeyword, title, headings, imageCount, us
       prompts.push(mainPrompt);
       console.log('✅ Using user-provided prompt for main image');
       
-      // Generate additional prompts for remaining images
+      // Generate AI prompts for remaining images
       for (let i = 1; i < imageCount; i++) {
-        const contextualPrompt = createContextualImagePrompt(mainKeyword, headings, i, false, width, height);
-        prompts.push(contextualPrompt);
-        console.log(`✅ Generated contextual prompt ${i + 1} using section headings`);
+        const aiPrompt = await generateAIImagePrompt(mainKeyword, headings, i, false, openrouterApiKey, model);
+        prompts.push(aiPrompt);
+        console.log(`✅ Generated AI prompt ${i + 1} using OpenRouter API`);
       }
     } else {
-      // Strategy 2: Generate all prompts using section headings and main keyword
+      // Strategy 2: Generate all prompts using AI
       for (let i = 0; i < imageCount; i++) {
         const isMainImage = i === 0;
-        const contextualPrompt = createContextualImagePrompt(mainKeyword, headings, i, isMainImage, width, height);
-        prompts.push(contextualPrompt);
-        console.log(`✅ Generated contextual prompt ${i + 1} (${isMainImage ? 'main' : 'content'}) using section headings`);
+        const aiPrompt = await generateAIImagePrompt(mainKeyword, headings, i, isMainImage, openrouterApiKey, model);
+        prompts.push(aiPrompt);
+        console.log(`✅ Generated AI prompt ${i + 1} (${isMainImage ? 'main' : 'content'}) using OpenRouter API`);
       }
       
       mainPrompt = prompts[0] || '';
@@ -482,12 +482,12 @@ async function generateImagePrompts(mainKeyword, title, headings, imageCount, us
     
     // Ensure we have the right number of prompts
     while (prompts.length < imageCount) {
-      const additionalPrompt = createContextualImagePrompt(mainKeyword, headings, prompts.length, false, width, height);
+      const additionalPrompt = await generateAIImagePrompt(mainKeyword, headings, prompts.length, false, openrouterApiKey, model);
       prompts.push(additionalPrompt);
-      console.log(`✅ Generated additional contextual prompt ${prompts.length}`);
+      console.log(`✅ Generated additional AI prompt ${prompts.length}`);
     }
     
-    console.log(`🎯 Image Prompt Generator completed successfully: ${prompts.length} prompts created`);
+    console.log(`🎯 AI-Powered Image Prompt Generator completed successfully: ${prompts.length} prompts created`);
     return {
       prompts: prompts,
       mainPrompt: mainPrompt,
@@ -495,7 +495,7 @@ async function generateImagePrompts(mainKeyword, title, headings, imageCount, us
     };
     
   } catch (error) {
-    console.error('❌ Image Prompt Generator failed:', error.message);
+    console.error('❌ AI-Powered Image Prompt Generator failed:', error.message);
     
     // Fallback: create basic prompts using main keyword
     console.log('🔄 Creating fallback prompts using main keyword...');
@@ -518,15 +518,96 @@ async function generateImagePrompts(mainKeyword, title, headings, imageCount, us
   }
 }
 
-// Helper function to create contextual image prompts based on section headings
-function createContextualImagePrompt(mainKeyword, headings, index, isMainImage, width, height) {
-  if (isMainImage) {
-    // Main image: use title and main keyword
-    return `Professional hero photograph of ${mainKeyword}, modern setting, natural lighting, warm color palette, wide angle, professional photography style, high contrast, web-ready, aspect ratio ${width}x${height}`;
-  } else {
-    // Content images: use specific section headings
-    const sectionHeading = headings?.section_1?.[index] || headings?.section_2?.[index - (headings?.section_1?.length || 0)] || 'article content';
-    return `Professional content photograph of ${mainKeyword} ${sectionHeading}, modern setting, natural lighting, warm color palette, close-up angle, professional photography style, high contrast, web-ready, aspect ratio ${width}x${height}`;
+// Function to generate AI image prompt using OpenRouter API
+async function generateAIImagePrompt(mainKeyword, headings, index, isMainImage, openrouterApiKey, model) {
+  try {
+    // Get the relevant section heading for this image
+    let sectionHeading = '';
+    if (isMainImage) {
+      // For main image, use a general article context
+      sectionHeading = 'article introduction and main topic';
+    } else {
+      // For content images, use specific section headings
+      sectionHeading = headings?.section_1?.[index] || 
+                     headings?.section_2?.[index - (headings?.section_1?.length || 0)] || 
+                     'article content';
+    }
+    
+    const messages = [
+      {
+        role: "system",
+        content: `🛠 System Prompt
+
+You are an expert visual content strategist and AI image prompt engineer for SEO-driven websites.
+Your job is to create highly descriptive, hyper-detailed AI image prompts for article illustrations.
+
+Input:
+
+Section Heading: A specific section title of the article
+
+Main Keyword: The primary target keyword for SEO
+
+Output:
+
+A single well-structured image prompt ready for an AI image generator (Midjourney, DALL·E, or Stable Diffusion).
+
+Image Prompt Rules:
+
+Focus on illustrating the Section Heading while visually reinforcing the Main Keyword.
+
+Describe main subject(s) in detail (what it is, style, perspective, props, context).
+
+Specify a scene setting (environment, mood, lighting, time of day, background details).
+
+Include visual style (realistic photo, vector art, flat illustration, 3D render, minimal infographic, etc.).
+
+Ensure brand consistency: clean, modern, SEO-friendly, website-friendly, no text in image.
+
+Use neutral colors with one accent tone, avoiding busy backgrounds.
+
+Always return one concise, polished prompt in natural language.
+
+Example Interaction:
+
+Input:
+Section Heading: "How to Calculate Compound Interest"
+Main Keyword: "compound interest calculator"
+
+Output:
+"A clean, modern 3D vector illustration of a person using a laptop to calculate savings growth, with a glowing graph showing exponential compound interest over time, stacks of coins rising gradually, a light minimal office background with plants, soft natural lighting, infographic-style design, no text, bright accent colors."
+
+CRITICAL: Return ONLY the image prompt. Do NOT include any explanations, markdown, or additional text.`
+      },
+      {
+        role: "user",
+        content: `Section Heading: "${sectionHeading}"
+Main Keyword: "${mainKeyword}"
+
+Generate an image prompt for this section.`
+      }
+    ];
+    
+    console.log(`🤖 Generating AI image prompt for: "${sectionHeading}" with keyword: "${mainKeyword}"`);
+    
+    // Call OpenRouter API to generate the prompt
+    const aiGeneratedPrompt = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, { maxTokens: 200 });
+    
+    if (aiGeneratedPrompt && aiGeneratedPrompt.trim()) {
+      console.log(`✅ AI prompt generated successfully: ${aiGeneratedPrompt.substring(0, 100)}...`);
+      return aiGeneratedPrompt.trim();
+    } else {
+      throw new Error('AI prompt generation returned empty result');
+    }
+    
+  } catch (error) {
+    console.error(`❌ AI prompt generation failed for index ${index}:`, error.message);
+    
+    // Fallback to basic prompt
+    if (isMainImage) {
+      return `Professional hero photograph of ${mainKeyword}, modern setting, natural lighting, professional style, high contrast, web-ready`;
+    } else {
+      return `Professional content photograph of ${mainKeyword}, modern setting, natural lighting, professional style, high contrast, web-ready`;
+    }
   }
 }
 
@@ -1070,10 +1151,10 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
         
         // Old createContextualPrompt function removed - now using dedicated Image Prompt Generator Module
         
-        // 🎯 DEDICATED IMAGE PROMPT GENERATOR MODULE
-        console.log('🎯 Starting dedicated Image Prompt Generator Module...');
+        // 🎯 AI-POWERED IMAGE PROMPT GENERATOR MODULE
+        console.log('🎯 Starting AI-Powered Image Prompt Generator Module...');
         
-        // Call the dedicated image prompt generator
+        // Call the AI-powered image prompt generator
         const imagePromptResult = await generateImagePrompts(
           sanitizedMainKeyword,
           metaData.title,
@@ -1081,7 +1162,9 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           sanitizedImageCount,
           sanitizedImagePrompt,
           finalImageWidth,
-          finalImageHeight
+          finalImageHeight,
+          openrouterApiKey,  // Pass the API key
+          defaultModel        // Pass the model
         );
         
         // Use the generated prompts
@@ -1097,8 +1180,8 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
           console.log('🔄 This should not happen with the dedicated module - checking for errors...');
         }
         
-        // Main feature image prompt already set by Image Prompt Generator Module
-        console.log('🎯 Image Prompt Generator Module completed - all prompts generated using section headings and main keyword');
+        // Main feature image prompt already set by AI-Powered Image Prompt Generator Module
+        console.log('🎯 AI-Powered Image Prompt Generator Module completed - all prompts generated using OpenRouter API');
         
         // Build image URLs with different prompts for variety
         for (let i = 0; i < sanitizedImageCount; i++) {
