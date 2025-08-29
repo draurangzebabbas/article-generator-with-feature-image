@@ -1,4 +1,4 @@
-//Round robin for batch and operations
+//BATCH PARALLEL TESTING Successfully Implemented!
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -105,7 +105,7 @@ const MODEL_FALLBACKS = [
 // 🚀 IMPROVED API Key Rotation & Reactivation Logic
 // Priority-based initial assignment (active → rate_limited → failed) with runtime replacement system and request-level cooldown
 
-// Smart key assignment - True Round-Robin with intelligent key recovery
+// Smart key assignment - True Round-Robin with intelligent batch key recovery
 async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, failedKeysInRequest = new Set()) {
   console.log(`🔍 Smart Key Assignment: Need ${requiredCount} keys for user ${userId}`);
   
@@ -176,48 +176,76 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
     return selectedKeys;
   }
 
-  // ⚠️ INSUFFICIENT ACTIVE KEYS: Need to test and recover keys first
-  console.log(`⚠️ INSUFFICIENT ACTIVE KEYS: ${activeKeys.length} active < ${requiredCount} needed`);
-  console.log(`🔄 Testing rate-limited and failed keys to increase active pool...`);
-
-  // 🔍 PHASE 1: Test rate-limited keys first (higher priority)
-  let recoveredKeys = [];
-  if (rateLimitedKeys.length > 0) {
-    console.log(`🧪 Testing ${rateLimitedKeys.length} rate-limited keys for recovery...`);
+  // ⚠️ INSUFFICIENT ACTIVE KEYS: Check if we need to test failed keys
+  const MIN_ACTIVE_KEYS_NEEDED = 5; // Only test if we have less than 5 active keys
+  
+  if (activeKeys.length >= MIN_ACTIVE_KEYS_NEEDED) {
+    console.log(`✅ SUFFICIENT ACTIVE KEYS: ${activeKeys.length} active >= ${MIN_ACTIVE_KEYS_NEEDED} minimum needed`);
+    console.log(`🔄 No need to test failed keys - using available active keys with rotation`);
     
-    for (const key of rateLimitedKeys) {
-      try {
-        const testResult = await testAndUpdateApiKey(supabase, key);
-        if (testResult.success && testResult.key.status === 'active') {
-          recoveredKeys.push(testResult.key);
-          console.log(`✅ Recovered rate-limited key: ${key.key_name}`);
-        }
-      } catch (error) {
-        console.log(`❌ Rate-limited key test failed: ${key.key_name} (${error.message})`);
-      }
-    }
+    // Use available active keys with rotation (will cycle back as needed)
+    const selectedKeys = activeKeys.slice(0, Math.min(requiredCount, activeKeys.length));
+    console.log(`🎯 Using ${selectedKeys.length} active keys with rotation for ${requiredCount} operations`);
+    return selectedKeys;
   }
 
-  // 🔍 PHASE 2: Test failed keys if we still need more
-  if (recoveredKeys.length + activeKeys.length < requiredCount && failedKeys.length > 0) {
-    console.log(`🧪 Testing ${failedKeys.length} failed keys for recovery...`);
+  // 🔄 NEED TO TEST FAILED KEYS: Only when we have less than 5 active keys
+  console.log(`⚠️ INSUFFICIENT ACTIVE KEYS: ${activeKeys.length} active < ${MIN_ACTIVE_KEYS_NEEDED} minimum needed`);
+  console.log(`🔄 Testing rate-limited and failed keys in BATCH PARALLEL to increase active pool...`);
+
+  // 🔄 BATCH PARALLEL TESTING: Test all keys at once instead of one by one
+  let recoveredKeys = [];
+  
+  if (rateLimitedKeys.length > 0 || failedKeys.length > 0) {
+    // Combine all keys that need testing
+    const keysToTest = [...rateLimitedKeys, ...failedKeys];
+    console.log(`🧪 BATCH TESTING: ${keysToTest.length} keys (${rateLimitedKeys.length} rate_limited + ${failedKeys.length} failed)`);
     
-    for (const key of failedKeys) {
+    // Test all keys in parallel using Promise.all for maximum speed
+    const testPromises = keysToTest.map(async (key) => {
       try {
         const testResult = await testAndUpdateApiKey(supabase, key);
-        if (testResult.success && testResult.key.status === 'active') {
-          recoveredKeys.push(testResult.key);
-          console.log(`✅ Recovered failed key: ${key.key_name}`);
-          
-          // Stop if we have enough keys now
-          if (recoveredKeys.length + activeKeys.length >= requiredCount) {
-            break;
-          }
-        }
+        return {
+          key: key,
+          success: testResult.success,
+          status: testResult.key.status,
+          keyName: key.key_name
+        };
       } catch (error) {
-        console.log(`❌ Failed key test failed: ${key.key_name} (${error.message})`);
+        return {
+          key: key,
+          success: false,
+          status: 'failed',
+          keyName: key.key_name,
+          error: error.message
+        };
+      }
+    });
+    
+    // Wait for all tests to complete in parallel
+    console.log(`⚡ Starting parallel testing of ${keysToTest.length} keys...`);
+    const testResults = await Promise.all(testPromises);
+    
+    // Process results and categorize keys
+    let newlyActive = 0;
+    let stillRateLimited = 0;
+    let stillFailed = 0;
+    
+    for (const result of testResults) {
+      if (result.success && result.status === 'active') {
+        recoveredKeys.push(result.key);
+        newlyActive++;
+        console.log(`✅ Key recovered: ${result.keyName} - now ACTIVE`);
+      } else if (result.success && result.status === 'rate_limited') {
+        stillRateLimited++;
+        console.log(`⚠️ Key still rate limited: ${result.keyName}`);
+      } else {
+        stillFailed++;
+        console.log(`❌ Key still failed: ${result.keyName}${result.error ? ` (${result.error})` : ''}`);
       }
     }
+    
+    console.log(`🔄 BATCH TESTING COMPLETED: ${newlyActive} recovered, ${stillRateLimited} still rate_limited, ${stillFailed} still failed`);
   }
 
   // 🔄 PHASE 3: Combine all available keys and distribute
@@ -1010,7 +1038,10 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
     
     // 🚀 IMPROVED: Get keys for ALL operations (7 total) with Round-Robin distribution
     const TOTAL_OPERATIONS = 7; // Meta & Toc, Tool, Tool Validator, Guide, Section 1, Section 2, FAQ
+    const MIN_ACTIVE_KEYS_NEEDED = 5; // Only test failed keys if we have less than 5 active
+    
     console.log(`🎯 Need ${TOTAL_OPERATIONS} keys for Round-Robin distribution across all operations`);
+    console.log(`🎯 Minimum active keys needed: ${MIN_ACTIVE_KEYS_NEEDED} (will test failed keys only if insufficient)`);
     
     const selectedKeys = await getSmartKeyAssignment(supabase, req.user.id, 'openrouter', TOTAL_OPERATIONS, failedKeysInRequest);
     
@@ -2108,29 +2139,27 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-// 🔄 PERIODIC KEY RECOVERY: Automatically check and recover failed keys
+// 🔄 PERIODIC KEY RECOVERY: Automatically check and recover failed keys with BATCH testing
 async function periodicKeyRecovery() {
   try {
     console.log('🔄 Starting periodic key recovery check...');
     
-    // Get all failed keys that haven't been checked recently
-    const { data: failedKeys } = await supabase
+    // Get all failed and rate-limited keys that haven't been checked recently
+    const { data: keysToCheck } = await supabase
       .from('api_keys')
       .select('*')
-      .eq('status', 'failed')
+      .in('status', ['failed', 'rate_limited'])
       .lt('last_failed', new Date(Date.now() - 10 * 60 * 1000).toISOString()); // 10 minutes ago
     
-    if (!failedKeys || failedKeys.length === 0) {
-      console.log('✅ No failed keys need recovery check');
+    if (!keysToCheck || keysToCheck.length === 0) {
+      console.log('✅ No keys need recovery check');
       return;
     }
     
-    console.log(`🔄 Found ${failedKeys.length} failed keys to check for recovery...`);
+    console.log(`🔄 Found ${keysToCheck.length} keys to check for recovery (${keysToCheck.filter(k => k.status === 'failed').length} failed + ${keysToCheck.filter(k => k.status === 'rate_limited').length} rate_limited)...`);
     
-    let recovered = 0;
-    let stillFailed = 0;
-    
-    for (const key of failedKeys) {
+    // 🔄 BATCH PARALLEL TESTING: Test all keys at once for maximum speed
+    const testPromises = keysToCheck.map(async (key) => {
       try {
         // Test the key with a simple API call
         const testResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -2148,27 +2177,59 @@ async function periodicKeyRecovery() {
           })
         });
         
-        if (testResponse.ok) {
-          // Key recovered - mark as active
+        return {
+          key: key,
+          success: testResponse.ok,
+          status: testResponse.status,
+          keyName: key.key_name
+        };
+      } catch (error) {
+        return {
+          key: key,
+          success: false,
+          status: 'error',
+          keyName: key.key_name,
+          error: error.message
+        };
+      }
+    });
+    
+    // Wait for all tests to complete in parallel
+    console.log(`⚡ Starting BATCH testing of ${keysToCheck.length} keys in parallel...`);
+    const testResults = await Promise.all(testPromises);
+    
+    // Process results and update keys
+    let recovered = 0;
+    let stillFailed = 0;
+    let stillRateLimited = 0;
+    
+    for (const result of testResults) {
+      if (result.success) {
+        // Key recovered - mark as active
+        try {
           await supabase.from('api_keys').update({
             status: 'active',
             failure_count: 0,
             last_recovered: new Date().toISOString(),
             last_used: new Date().toISOString()
-          }).eq('id', key.id);
-          console.log(`✅ Auto-recovered key: ${key.key_name}`);
+          }).eq('id', result.key.id);
+          console.log(`✅ Auto-recovered key: ${result.keyName}`);
           recovered++;
-        } else {
-          console.log(`❌ Key still failed: ${key.key_name} (${testResponse.status})`);
-          stillFailed++;
+        } catch (updateError) {
+          console.log(`⚠️ Failed to update key status: ${result.keyName} (${updateError.message})`);
         }
-      } catch (error) {
-        console.log(`❌ Key test failed: ${key.key_name} (${error.message})`);
+      } else if (result.status === 429) {
+        // Still rate limited
+        stillRateLimited++;
+        console.log(`⚠️ Key still rate limited: ${result.keyName}`);
+      } else {
+        // Still failed
         stillFailed++;
+        console.log(`❌ Key still failed: ${result.keyName}${result.error ? ` (${result.error})` : ''}`);
       }
     }
     
-    console.log(`🔄 Periodic recovery completed: ${recovered} recovered, ${stillFailed} still failed`);
+    console.log(`🔄 BATCH recovery completed: ${recovered} recovered, ${stillRateLimited} still rate_limited, ${stillFailed} still failed`);
     
   } catch (error) {
     console.error('❌ Periodic key recovery failed:', error.message);
