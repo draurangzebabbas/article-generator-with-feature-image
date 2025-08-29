@@ -1,4 +1,4 @@
-//COMPREHENSIVE CODE REVIEW COMPLETED - ALL ISSUES FIXED!
+//Exact image  pompt generation and parallel key testing
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -650,60 +650,18 @@ async function generateAIImagePrompt(mainKeyword, headings, index, isMainImage, 
       // For content images, use specific section headings
       sectionHeading = headings?.section_1?.[index] || 
                      headings?.section_2?.[index - (headings?.section_1?.length || 0)] || 
-                     'article content';
+                     'article content section';
     }
-    
+
+    // Use the exact professional prompt structure you provided
     const messages = [
       {
         role: "system",
-        content: `🛠 System Prompt
-
-You are an expert visual content strategist and AI image prompt engineer for SEO-driven websites.
-Your job is to create highly descriptive, hyper-detailed AI image prompts for article illustrations.
-
-Input:
-
-Section Heading: A specific section title of the article
-
-Main Keyword: The primary target keyword for SEO
-
-Output:
-
-A single well-structured image prompt ready for an AI image generator (Midjourney, DALL·E, or Stable Diffusion).
-
-Image Prompt Rules:
-
-Focus on illustrating the Section Heading while visually reinforcing the Main Keyword.
-
-Describe main subject(s) in detail (what it is, style, perspective, props, context).
-
-Specify a scene setting (environment, mood, lighting, time of day, background details).
-
-Include visual style (realistic photo, vector art, flat illustration, 3D render, minimal infographic, etc.).
-
-Ensure brand consistency: clean, modern, SEO-friendly, website-friendly, no text in image.
-
-Use neutral colors with one accent tone, avoiding busy backgrounds.
-
-Always return one concise, polished prompt in natural language.
-
-Example Interaction:
-
-Input:
-Section Heading: "How to Calculate Compound Interest"
-Main Keyword: "compound interest calculator"
-
-Output:
-"A clean, modern 3D vector illustration of a person using a laptop to calculate savings growth, with a glowing graph showing exponential compound interest over time, stacks of coins rising gradually, a light minimal office background with plants, soft natural lighting, infographic-style design, no text, bright accent colors."
-
-CRITICAL: Return ONLY the image prompt. Do NOT include any explanations, markdown, or additional text.`
+        content: "You are an expert visual content strategist and AI image prompt engineer for SEO-driven websites.\r\nYour job is to create highly descriptive, hyper-detailed AI image prompts for article illustrations.\r\n\r\nInput:\r\n\r\nSection Heading: A specific section title of the article\r\n\r\nMain Keyword: The primary target keyword for SEO\r\n\r\nOutput:\r\n\r\nA single well-structured image prompt ready for an AI image generator (Midjourney, DALL·E, or Stable Diffusion).\r\n\r\nImage Prompt Rules:\r\n\r\nFocus on illustrating the Section Heading while visually reinforcing the Main Keyword.\r\n\r\nDescribe main subject(s) in detail (what it is, style, perspective, props, context).\r\n\r\nSpecify a scene setting (environment, mood, lighting, time of day, background details).\r\n\r\nInclude visual style (realistic photo, vector art, flat illustration, 3D render, minimal infographic, etc.).\r\n\r\nEnsure brand consistency: clean, modern, SEO-friendly, website-friendly, no text in image.\r\n\r\nUse neutral colors with one accent tone, avoiding busy backgrounds.\r\n\r\nAlways return one concise, polished prompt in natural language.\r\n\r\nExample Interaction:\r\n\r\nInput:\r\nSection Heading: \"How to Calculate Compound Interest\"\r\nMain Keyword: \"compound interest calculator\"\r\n\r\nOutput:\r\n\"A clean, modern 3D vector illustration of a person using a laptop to calculate savings growth, with a glowing graph showing exponential compound interest over time, stacks of coins rising gradually, a light minimal office background with plants, soft natural lighting, infographic-style design, no text, bright accent colors.\"\r\n\r\nCRITICAL: Return ONLY the image prompt. Do NOT include any explanations, markdown, or additional text."
       },
       {
         role: "user",
-        content: `Section Heading: "${sectionHeading}"
-Main Keyword: "${mainKeyword}"
-
-Generate an image prompt for this section.`
+        content: `Section Heading: "${sectionHeading}"\r\nMain Keyword: "${mainKeyword}"\r\n\r\nGenerate an image prompt for this section which should be highly relevant to this.`
       }
     ];
     
@@ -1074,23 +1032,57 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
       console.log(`🔄 Perfect Round-Robin distribution possible!`);
     }
 
-    // Test all selected keys to ensure they're working
+    // Test all selected keys to ensure they're working - IN PARALLEL for maximum speed
+    console.log(`🧪 Testing ${selectedKeys.length} selected keys in PARALLEL for maximum speed...`);
+    
+    const testPromises = selectedKeys.map(async (key, index) => {
+      try {
+        const testResult = await testAndUpdateApiKey(supabase, key);
+        return {
+          key: key,
+          index: index + 1,
+          success: testResult.success,
+          status: testResult.key.status,
+          keyName: key.key_name
+        };
+      } catch (error) {
+        return {
+          key: key,
+          index: index + 1,
+          success: false,
+          status: 'failed',
+          keyName: key.key_name,
+          error: error.message
+        };
+      }
+    });
+    
+    // Wait for all tests to complete in parallel
+    console.log(`⚡ Starting PARALLEL testing of ${selectedKeys.length} keys...`);
+    const testResults = await Promise.all(testPromises);
+    
+    // Process results and categorize keys
     const testedKeys = [];
-    for (let i = 0; i < selectedKeys.length; i++) {
-      const key = selectedKeys[i];
-      const testResult = await testAndUpdateApiKey(supabase, key);
-      if (testResult.success) {
-        testedKeys.push(testResult.key);
-        if (testResult.key.status === 'active') {
-          recentlyActivatedKeys.add(testResult.key.id);
+    let passedKeys = 0;
+    let failedKeys = 0;
+    
+    for (const result of testResults) {
+      if (result.success) {
+        testedKeys.push(result.key);
+        if (result.key.status === 'active') {
+          recentlyActivatedKeys.add(result.key.id);
         }
-        console.log(`✅ Key ${i + 1}/${selectedKeys.length}: ${key.key_name} - TEST PASSED`);
+        passedKeys++;
+        console.log(`✅ Key ${result.index}/${selectedKeys.length}: ${result.keyName} - TEST PASSED`);
       } else {
-        console.log(`⚠️ Key ${i + 1}/${selectedKeys.length}: ${key.key_name} - TEST FAILED, but continuing`);
+        console.log(`⚠️ Key ${result.index}/${selectedKeys.length}: ${result.keyName} - TEST FAILED, but continuing`);
         // Still add the key even if test failed (it might work for actual operations)
-        testedKeys.push(key);
+        testedKeys.push(result.key);
+        failedKeys++;
       }
     }
+    
+    console.log(`🔄 PARALLEL TESTING COMPLETED: ${passedKeys} passed, ${failedKeys} failed`);
 
     // Initialize key rotation index for Round-Robin distribution
     let currentKeyIndex = 0;
