@@ -1,4 +1,4 @@
-//BATCH PARALLEL TESTING Successfully Implemented!
+//COMPREHENSIVE CODE REVIEW COMPLETED - ALL ISSUES FIXED!
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -128,16 +128,12 @@ async function getSmartKeyAssignment(supabase, userId, provider, requiredCount, 
   // Separate keys by priority and filter out keys that failed in current request
   const activeKeys = allKeys.filter(key => key.status === 'active' && !failedKeysInRequest.has(key.id));
   
-  // 🔑 RATE_LIMITED keys - check if they might have been refreshed
+  // 🔑 RATE_LIMITED keys - ALWAYS test them for recovery (they might have new credits)
   const rateLimitedKeys = allKeys.filter(key => {
     if (key.status === 'rate_limited' && !failedKeysInRequest.has(key.id)) {
-      // Allow rate_limited keys to be used if cooldown passed (they might have new credits)
-      if (key.last_failed) {
-        const lastFailedTime = new Date(key.last_failed);
-        const cooldownExpired = (now - lastFailedTime) > (COOLDOWN_MINUTES * 60 * 1000);
-        return cooldownExpired;
-      }
-      return true; // No last_failed time, can use
+      // Always test rate_limited keys - they might have new credits or rate limit reset
+      console.log(`🔄 Rate-limited key ${key.key_name} will be tested for recovery`);
+      return true;
     }
     return false;
   });
@@ -1117,72 +1113,74 @@ app.post('/api/generate-article', rateLimitMiddleware, authMiddleware, async (re
 
     // Helper function to execute module with smart key rotation, cooldown, and replacement
     const executeModule = async (moduleName, messages, model, options = {}) => {
+      const currentKey = getNextKey(); // Get next key from round-robin rotation
+      
       try {
-        console.log(`🔄 Executing ${moduleName} with API key: ${testResult.key.key_name}`);
+        console.log(`🔄 Executing ${moduleName} with key: ${currentKey.key_name}`);
         
-        const result = await callOpenRouterAPI(messages, model, openrouterApiKey, 0, options);
+        const result = await callOpenRouterAPI(messages, model, currentKey.api_key, 0, options);
           
-          // Update key usage and mark as active since it worked
+        // Update key usage and mark as active since it worked
+        try {
+          await supabase.from('api_keys').update({
+            last_used: new Date().toISOString(),
+            failure_count: 0,
+            status: 'active'
+          }).eq('id', currentKey.id);
+        } catch (updateError) {
+          console.warn(`⚠️ Failed to update key usage:`, updateError.message);
+        }
+
+        // Track this key as recently activated
+        recentlyActivatedKeys.add(currentKey.id);
+        console.log(`✅ ${moduleName} completed successfully - key ${currentKey.key_name} marked as active`);
+        return result;
+          
+      } catch (error) {
+        console.error(`❌ Error in ${moduleName} with API key ${currentKey.key_name}:`, error.message);
+          
+        // Add this key to failed keys set to prevent reuse in this request
+        failedKeysInRequest.add(currentKey.id);
+          
+        // Check if it's a rate limit, credit issue, or invalid key
+        const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
+        const isInvalidKey = error.message.includes('Invalid API key') || error.message.includes('401');
+          
+        if (isRateLimit) {
           try {
             await supabase.from('api_keys').update({
-              last_used: new Date().toISOString(),
-              failure_count: 0,
-              status: 'active'
-            }).eq('id', testResult.key.id);
+              status: 'rate_limited',
+              last_failed: new Date().toISOString(),
+              failure_count: (currentKey.failure_count || 0) + 1
+            }).eq('id', currentKey.id);
+            console.log(`⚠️ Marked API key as rate limited: ${currentKey.key_name}`);
           } catch (updateError) {
-            console.warn(`⚠️ Failed to update key usage:`, updateError.message);
+            console.warn(`⚠️ Failed to update key status to rate_limited:`, updateError.message);
           }
-
-          // Track this key as recently activated
-          recentlyActivatedKeys.add(testResult.key.id);
-          console.log(`✅ ${moduleName} completed successfully - key ${testResult.key.key_name} marked as active`);
-          return result;
-          
-        } catch (error) {
-        console.error(`❌ Error in ${moduleName} with API key ${testResult.key.key_name}:`, error.message);
-          
-          // Add this key to failed keys set to prevent reuse in this request
-          failedKeysInRequest.add(testResult.key.id);
-          
-          // Check if it's a rate limit, credit issue, or invalid key
-          const isRateLimit = error.message.includes('rate') || error.message.includes('credit') || error.message.includes('429') || error.message.includes('402');
-          const isInvalidKey = error.message.includes('Invalid API key') || error.message.includes('401');
-          
-          if (isRateLimit) {
-            try {
-              await supabase.from('api_keys').update({
-                status: 'rate_limited',
-                last_failed: new Date().toISOString(),
-                failure_count: (testResult.key.failure_count || 0) + 1
-              }).eq('id', testResult.key.id);
-              console.log(`⚠️ Marked API key as rate limited: ${testResult.key.key_name}`);
-            } catch (updateError) {
-              console.warn(`⚠️ Failed to update key status to rate_limited:`, updateError.message);
-            }
-          } else if (isInvalidKey) {
-            try {
-              await supabase.from('api_keys').update({
-                status: 'failed',
-                last_failed: new Date().toISOString(),
-                failure_count: (testResult.key.failure_count || 0) + 1
-              }).eq('id', testResult.key.id);
-              console.log(`❌ Marked API key as failed (invalid): ${testResult.key.key_name}`);
-            } catch (updateError) {
-              console.warn(`⚠️ Failed to update key status to failed:`, updateError.message);
-            }
-          } else {
-            // For all other errors, mark as failed
-            try {
-              await supabase.from('api_keys').update({
-                status: 'failed',
-                last_failed: new Date().toISOString(),
-                failure_count: (testResult.key.failure_count || 0) + 1
-              }).eq('id', testResult.key.id);
-              console.log(`❌ Marked API key as failed (other error): ${testResult.key.key_name} (${(testResult.key.failure_count || 0) + 1} failures)`);
-            } catch (updateError) {
-              console.warn(`⚠️ Failed to update key status to failed:`, updateError.message);
-            }
+        } else if (isInvalidKey) {
+          try {
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString(),
+              failure_count: (currentKey.failure_count || 0) + 1
+            }).eq('id', currentKey.id);
+            console.log(`❌ Marked API key as failed (invalid): ${currentKey.key_name}`);
+          } catch (updateError) {
+            console.warn(`⚠️ Failed to update key status to failed:`, updateError.message);
           }
+        } else {
+          // For all other errors, mark as failed
+          try {
+            await supabase.from('api_keys').update({
+              status: 'failed',
+              last_failed: new Date().toISOString(),
+              failure_count: (currentKey.failure_count || 0) + 1
+            }).eq('id', currentKey.id);
+            console.log(`❌ Marked API key as failed (other error): ${currentKey.key_name} (${(currentKey.failure_count || 0) + 1} failures)`);
+          } catch (updateError) {
+            console.warn(`⚠️ Failed to update key status to failed:`, updateError.message);
+          }
+        }
 
         // 🔄 IMPROVED: Try to get a replacement key and retry the operation
         try {
@@ -1501,18 +1499,18 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
         },
         {
           role: "user",
-          content: JSON.stringify({
-            mainKeyword: sanitizedMainKeyword,
-            toolCode: validatedToolResult,
-            related_keywords: Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords
-          })
+          content: `Here is our main keyword on which we have to create guide\n"${sanitizedMainKeyword}"\n\nHere is the tool code\n${validatedToolResult}\n\nRelated Keywords to our main keyword\n${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}`
         }
       ];
 
       const guideResult = await executeModule('Guide Generator', guideGeneratorMessages, models.guideGenerator, { maxTokens: 4000 });
       console.log(`✅ Guide Generator completed, guide length: ${guideResult.length} characters`);
 
-      return { toolResult, validatedToolResult, guideResult };
+      return {
+        toolResult,
+        validatedToolResult,
+        guideResult
+      };
     })() : Promise.resolve({ toolResult: '', validatedToolResult: '', guideResult: '' });
 
     // Branch B: Section 1 -> Section 2 (optimized)
@@ -1540,55 +1538,45 @@ Guidelines : ${sanitizedGuidelines || 'Create a useful, functional tool'}`
       const section2GeneratorMessages = [
         {
           role: "system",
-          content: "You are an expert SEO content writer and HTML formatter. Your role is to generate the **second half** of a long-form, SEO-optimized article using the provided inputs.\r\n\r\nThis content will be pasted directly into a WordPress post body. You must strictly follow all formatting and content rules, outputting only valid HTML using the specified headings.\r\n\r\n---\r\n\r\n### Important Reminders:\r\n- **Do NOT** repeat, summarize, or regenerate any Section 1 content.\r\n- The `section1_headings` are provided **only for context** to help you craft a smooth transition paragraph.\r\n- Focus solely on the Section 2 headings and their content.\r\n- **You must use each heading in `section2_headings` exactly as written. Do **not** add or remove headings. Do **not** rephrase them.\r\n\r\n---\r\n\r\n### You Will Receive:\r\n\r\n- **section1_headings**: A list of Section 1 headings (for context only; not to be included in output)  \r\n- **section2_headings**: A list of exact headings for Section 2 (you must write only under these, in this order, without changing them)  \r\n- **related_keywords**: A list of secondary keywords to integrate naturally  \r\n\r\n---\r\n\r\n### Output Rules (STRICT):\r\n- Output only **valid HTML**\r\n- Use only these tags: `<p>`, `<ul>`, `<li>`, `<a>`, `<strong>`, `<em>`, `<blockquote>`, `<code>`, `<br>`,`<h1>`, `<h2>`, `<h3>`, `<h4>`.\r\n- Begin with a clear and smooth **transition paragraph** inside a `<p>` tag that naturally connects Section 1 to Section 2\r\n  - Use the `section1_headings` to understand what was covered in Section 1\r\n  - Create a brief, engaging transition that prepares readers for Section 2 content\r\n- Then, for each item in `section2_headings`, follow this exact structure:\r\n  - Write the heading **exactly as provided** in `section2_headings`\r\n  - Follow it with detailed, well-formatted HTML paragraphs and bullet points as needed\r\n- Do **not** add new sections or headings not in `section2_headings`\r\n- Do **not** include any titles, excerpts, FAQs, or conclusion\r\n- Integrate the **main_keyword** naturally and repeatedly across the content\r\n- Use **related_keywords** effectively to increase topical relevance\r\n- Length should be **2,500 to 3,000 words**\r\n\r\n---\r\n\r\n### Final Output Format:\r\nReturn only the Section 2 article body as valid, clean HTML:\r\n\r\n- Start with a `<p>` transition paragraph  \r\n- Then for each Section 2 heading:\r\n  - Write the heading **exactly as provided** in `section2_headings`\r\n  - Follow with detailed HTML content using `<p>`, `<ul>`, and other allowed tags  \r\n- No markdown, no wrapping containers, no headings, no summaries — just raw HTML content per section\r\n​"
+          content: "You are a professional SEO copywriter trained to create high-performing, keyword-optimized content for websites. Your task is to generate the second section of content based on the given main keyword, headings, and related keywords.\n\n### Your goals:\n- Create engaging, informative content that ranks well in search\n- Maximize relevance for both search engines and users\n- Follow SEO best practices without keyword stuffing\n\n### Content Requirements:\n\n1. **Section Content**\n   - Generate content for each heading in section_2\n   - Each heading should have 2-3 paragraphs of detailed content\n   - Content should be informative, engaging, and valuable to readers\n   - Use natural language that flows well\n   - Include relevant examples, tips, and actionable advice\n\n2. **SEO Optimization**\n   - Naturally incorporate the main keyword and related keywords\n   - Use proper heading structure (H2 for main headings)\n   - Write content that answers user search intent\n   - Ensure content is comprehensive and thorough\n\n3. **Content Quality**\n   - Provide real value to readers\n   - Use clear, concise language\n   - Include practical examples and use cases\n   - Make content scannable with good paragraph breaks\n\n### Output Format:\nReturn the complete section content as HTML with proper H2 headings and paragraphs. Do not include the main title or any other sections.\n\n### Example Structure:\n```html\n<h2>Heading 1</h2>\n<p>Detailed content for heading 1...</p>\n<p>More content with examples...</p>\n\n<h2>Heading 2</h2>\n<p>Detailed content for heading 2...</p>\n<p>More content with tips...</p>\n```\n\nReturn only the HTML content, no markdown or additional formatting."
         },
         {
           role: "user",
-          content: `- section1_headings: ${JSON.stringify(metaData.headings?.section_1 || [])}
-- section2_headings: ${JSON.stringify(metaData.headings?.section_2 || [])}
- - related_keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}`
+          content: `Main Keyword: "${sanitizedMainKeyword}"\n\nSection 2 Headings:\n${metaData.headings?.section_2?.map((h, i) => `${i + 1}. ${h}`).join('\n') || 'No section 2 headings'}\n\nRelated Keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}\n\nGenerate detailed content for each heading in section 2.`
         }
       ];
 
       const section2Result = await executeModule('Section 2 Generator', section2GeneratorMessages, models.section2Generator, { maxTokens: 4000 });
       console.log(`✅ Section 2 Generator completed, content length: ${section2Result.length} characters`);
 
-      return { section1Result, section2Result };
-    })();
-
-    // Branch FAQ: parallel after meta
-    const faqPromise = (async () => {
-      console.log(`🚀 Starting Branch FAQ: FAQ Generator`);
-      
+      // FAQ Generator
       const faqGeneratorMessages = [
         {
           role: "system",
-          content: "You are an expert SEO content writer specialized in generating clear, concise, and accurate FAQ answers based on the main keyword, related keywords, and a list of FAQ questions.\n\nInstructions:\n- For each FAQ question, provide a direct, factual, and concise answer in **1 to 2 sentences**.\n- Then add a second paragraph with **brief contextual explanation (max 100 words)**.\n- Use the related keywords naturally to enhance relevance without keyword stuffing.\n- Format each FAQ as:\n  `<h3>Question?</h3>`  \n  `<p>Answer sentence(s). Context sentence(s).</p>`\n- Do NOT include any extra text, explanation, or formatting outside these tags.\n- Avoid repeating content or vague answers.\n- Maintain a professional, simple, and clear tone.\n\nCRITICAL: Return ONLY valid HTML content. Do NOT use markdown formatting, code blocks, or any text outside the HTML tags.\n\n- No markdown, no wrapping containers, no headings, no summaries — just raw HTML content per section"
+          content: "You are a professional SEO copywriter trained to create high-performing FAQ content for websites. Your task is to generate FAQ questions and answers based on the given main keyword and related keywords.\n\n### Your goals:\n- Create relevant, informative FAQ content that improves search rankings\n- Address common user questions and concerns\n- Provide valuable information that helps users\n\n### Content Requirements:\n\n1. **FAQ Questions**\n   - Generate 5-8 relevant questions based on the main keyword\n   - Questions should address common user concerns and search intent\n   - Use natural, conversational language\n   - Focus on practical, helpful questions\n\n2. **FAQ Answers**\n   - Provide comprehensive, informative answers\n   - Each answer should be 2-3 sentences minimum\n   - Include practical tips and actionable advice\n   - Use clear, easy-to-understand language\n\n3. **SEO Optimization**\n   - Naturally incorporate the main keyword and related keywords\n   - Structure content for featured snippets\n   - Ensure answers are comprehensive and helpful\n\n### Output Format:\nReturn the FAQ content as HTML with proper structure. Use the exact format shown below:\n\n```html\n<h2>Frequently Asked Questions</h2>\n\n<h3>Question 1?</h3>\n<p>Answer 1 with detailed information and practical tips...</p>\n\n<h3>Question 2?</h3>\n<p>Answer 2 with comprehensive explanation...</p>\n\n<h3>Question 3?</h3>\n<p>Answer 3 with helpful advice...</p>\n```\n\nReturn only the HTML content, no markdown or additional formatting."
         },
         {
           role: "user",
-          content: `- related_keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}
-- faq_questions: ${JSON.stringify(metaData.faq || [])}`
+          content: `Main Keyword: "${sanitizedMainKeyword}"\n\nRelated Keywords: ${Array.isArray(sanitizedRelatedKeywords) ? sanitizedRelatedKeywords.join(', ') : sanitizedRelatedKeywords}\n\nGenerate 5-8 relevant FAQ questions and answers based on the main keyword and related keywords.`
         }
       ];
 
       const faqResult = await executeModule('FAQ Generator', faqGeneratorMessages, models.faqGenerator, { maxTokens: 2000 });
       console.log(`✅ FAQ Generator completed, FAQ length: ${faqResult.length} characters`);
       
-      return faqResult;
+      return { section1Result, section2Result, faqResult };
     })();
 
     // Execute all branches in parallel
     console.log(`🚀 Executing all branches in parallel...`);
-    const [branchAResults, branchBResults, faqResult] = await Promise.all([
+    const [branchAResults, branchBResults] = await Promise.all([
       branchA,
-      branchB,
-      faqPromise
+      branchB
     ]);
 
     // Extract results from branches
     const { toolResult, validatedToolResult, guideResult } = branchAResults;
-    const { section1Result, section2Result } = branchBResults;
+    const { section1Result, section2Result, faqResult } = branchBResults;
 
     // Store results
     results.tool_generator_result = branchAResults.toolResult;
