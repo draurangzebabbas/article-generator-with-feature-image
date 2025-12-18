@@ -1,4 +1,4 @@
-//No supabase dependency
+//Supabase removed all keys passes in input json
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -330,13 +330,81 @@ app.post('/api/generate-article', authMiddleware, async (req, res) => {
     const sanitizedRelatedKeywords = Array.isArray(relatedKeywords) ? relatedKeywords : String(relatedKeywords || '').split(',').filter(Boolean);
     const sanitizedImageCount = Math.min(Math.max(1, Number(imageCount) || 1), 5);
 
+    // --- SERP Research (Apify) ---
+    let finalTop10Articles = top10Articles || '';
+    let serpResultsForResponse = [];
+
+    if (competitorResearch && apifyApiKey) {
+      console.log('🕵️‍♂️ Starting SERP Research with Apify...');
+      try {
+        // Support comma-separated keys for rotation
+        const apifyKeys = String(apifyApiKey).split(',').map(k => k.trim()).filter(Boolean);
+        const activeApifyKey = apifyKeys[0]; // Simple logic: take first one
+
+        const serpCountryCode = (serpCountry || 'US').toUpperCase();
+
+        // 1. Start Crawler
+        const run = await fetch('https://api.apify.com/v2/acts/scraperlink~google-search-results-serp-scraper/runs', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${activeApifyKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ country: serpCountryCode, keyword: sanitizedMainKeyword, page: Number(serpPage) || 1 })
+        });
+
+        if (!run.ok) throw new Error(`Apify start failed: ${run.status}`);
+        const runData = await run.json();
+        const runId = runData.data.id;
+
+        // 2. Poll for results
+        let attempts = 0;
+        while (attempts < 30) {
+          await new Promise(r => setTimeout(r, 5000));
+          const check = await fetch(`https://api.apify.com/v2/acts/scraperlink~google-search-results-serp-scraper/runs/${runId}`, {
+            headers: { 'Authorization': `Bearer ${activeApifyKey}` }
+          });
+          const checkData = await check.json();
+          if (checkData.data.status === 'SUCCEEDED') break;
+          if (checkData.data.status === 'FAILED') throw new Error('Apify run failed');
+          attempts++;
+        }
+
+        // 3. Get Dataset
+        const datasetRes = await fetch(`https://api.apify.com/v2/acts/scraperlink~google-search-results-serp-scraper/runs/${runId}/dataset/items`, {
+          headers: { 'Authorization': `Bearer ${activeApifyKey}` }
+        });
+        const items = await datasetRes.json();
+
+        if (Array.isArray(items) && items.length > 0) {
+          const results = items[0].results || [];
+          serpResultsForResponse = results.slice(0, 10).map(r => ({ title: r.title, url: r.url, desc: r.description }));
+
+          // Format for LLM
+          const lines = results.slice(0, 10).map(r => `Title: ${r.title}\nDescription: ${r.description}`).join('\n\n');
+          if (lines) finalTop10Articles = lines;
+
+          // Append related keywords from SERP if available
+          if (items[0].related_keywords?.keywords) {
+            const serpKeywords = items[0].related_keywords.keywords;
+            if (serpKeywords.length) {
+              // Add to related keywords if not already present
+              sanitizedRelatedKeywords.push(...serpKeywords);
+            }
+          }
+          console.log(`✅ SERP Research complete. Found ${results.length} results.`);
+        }
+
+      } catch (e) {
+        console.error('⚠️ SERP Research failed:', e.message);
+        // Continue without it
+      }
+    }
+
     // --- Steps ---
 
     // 1. Meta & TOC
     console.log(`Step 1: Meta & TOC for "${sanitizedMainKeyword}"`);
     const metaMessages = [
       { role: "system", content: "You are an expert SEO copywriter. Return ONLY a valid JSON object with: { \"title\": \"...\", \"excerpt\": \"...\", \"headings\": { \"section_1\": [], \"section_2\": [] }, \"faq\": [] }." },
-      { role: "user", content: `Main keyword: ${sanitizedMainKeyword}. Top 10 articles: ${top10Articles || 'None'}. Related: ${sanitizedRelatedKeywords.join(',')}.` }
+      { role: "user", content: `Main keyword: ${sanitizedMainKeyword}. Top 10 articles: ${finalTop10Articles || 'None'}. Related: ${sanitizedRelatedKeywords.join(',')}.` }
     ];
 
     let metaResult = await executeModule('MetaGenerator', metaMessages, MODEL_FALLBACKS[0]);
