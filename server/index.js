@@ -1,4 +1,4 @@
-//Supabase removed all keys passes in input json and round robin
+//No endpoints found handling and more fallback models added
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -55,10 +55,10 @@ const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // Model fallback system
 const MODEL_FALLBACKS = [
-  'deepseek/deepseek-r1:free',
-  'deepseek/deepseek-r1-distill-llama-70b:free',
-  'deepseek/deepseek-chat-v3:free',
-  'google/gemini-2.0-flash-exp:free'
+  'tngtech/deepseek-r1t-chimera:free',
+  'qwen/qwen3-coder:free',
+  'openai/gpt-oss-20b:free',
+  'deepseek/deepseek-r1-0528:free'
 ];
 
 // Helper: Call OpenRouter API
@@ -95,6 +95,9 @@ async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, option
       if (response.status === 401) throw new Error('Invalid API key');
       if (response.status === 429) throw new Error('Rate limited');
       if (response.status === 402) throw new Error('Insufficient credits');
+      if (response.status === 404 && errorText.includes('No endpoints found')) throw new Error('404: No endpoints found for model');
+      if (response.status === 404) throw new Error('404: Not Found');
+
 
       throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
     }
@@ -112,7 +115,7 @@ async function callOpenRouterAPI(messages, model, apiKey, retryCount = 0, option
     console.error(`❌ Error with OpenRouter API:`, error.message);
 
     // Propagate specific errors to allow key rotation
-    if (error.message.includes('Rate limited') || error.message.includes('Insufficient credits') || error.message.includes('Invalid API key')) {
+    if (error.message.includes('Rate limited') || error.message.includes('Insufficient credits') || error.message.includes('Invalid API key') || error.message.includes('404')) {
       throw error;
     }
 
@@ -306,36 +309,58 @@ app.post('/api/generate-article', authMiddleware, async (req, res) => {
       }
     };
 
-    // Execute Module with Retry/Rotation
-    const executeModule = async (moduleName, messages, model, options = {}) => {
+    // Execute Module with Robust Model & Key Rotation
+    const executeModule = async (moduleName, messages, initialModel, options = {}) => {
+      // Prepare list of models to try: [preferred, ...others] (unique)
+      const modelsToTry = [initialModel, ...MODEL_FALLBACKS.filter(m => m !== initialModel)];
       let lastError;
 
-      // Try looping until we succeed or run out of keys
-      while (true) {
-        let currentKeyObj;
-        try {
-          currentKeyObj = keyManager.getKey();
-        } catch (e) {
-          // No keys left
-          throw lastError || e;
-        }
+      // OUTER LOOP: Models
+      for (const model of modelsToTry) {
 
-        try {
-          console.log(`🚀 Executing ${moduleName} with key ending in ...${currentKeyObj.key.slice(-4)}`);
-          const result = await callOpenRouterAPI(messages, model, currentKeyObj.key, 0, options);
-          return result;
-        } catch (error) {
-          lastError = error;
-          // If rate limited or invalid, mark and loop
-          if (error.message.includes('Rate limited') || error.message.includes('Insufficient credits') || error.message.includes('Invalid API key')) {
-            keyManager.markFailed(currentKeyObj.key, error.message);
-            continue; // Try next key
+        // INNER LOOP: Keys (Retry up to 5 times per model or until keys run out)
+        let retriesOnModel = 0;
+        const maxRetriesOnModel = 5;
+
+        while (retriesOnModel < maxRetriesOnModel) {
+          let currentKeyObj;
+          try {
+            currentKeyObj = keyManager.getKey();
+          } catch (e) {
+            // No keys left at all? Stop everything.
+            throw e;
           }
-          // If other error (like timeout or internal server error from provider that isn't auth related), maybe retrying same key is pointless if it's the model, but for now we mark failed to be safe or rethrow?
-          // Let's mark failed to try another key if possible.
-          keyManager.markFailed(currentKeyObj.key, error.message);
+
+          try {
+            console.log(`🚀 Executing ${moduleName} using Model: ${model} | Key: ...${currentKeyObj.key.slice(-4)}`);
+            const result = await callOpenRouterAPI(messages, model, currentKeyObj.key, 0, options);
+            return result; // Success!
+          } catch (error) {
+            lastError = error;
+            const errMsg = error.message || '';
+
+            // Case 1: STRICT "No endpoints found" -> ABORT THIS MODEL
+            if (errMsg.includes('No endpoints found')) {
+              console.warn(`⚠️ Model ${model} returned "No endpoints found". Switching to next model...`);
+              break; // Break inner loop, go to next model in outer loop
+            }
+
+            // Case 2: Auth/Rate Limit -> MARK KEY FAILED, RETRY SAME MODEL
+            if (errMsg.includes('Rate limited') || errMsg.includes('Insufficient credits') || errMsg.includes('Invalid API key')) {
+              keyManager.markFailed(currentKeyObj.key, errMsg);
+              retriesOnModel++;
+              continue; // Try next key
+            }
+
+            // Case 3: Other errors -> RETRY (e.g. timeout, generic 500, or other 404s)
+            retriesOnModel++;
+            continue;
+          }
         }
       }
+
+      // If we exhausted all models and all retries
+      throw new Error(`ExecuteModule failed after trying all models. Last error: ${lastError?.message}`);
     };
 
     // Sanitization (keeping simple)
@@ -440,28 +465,40 @@ app.post('/api/generate-article', authMiddleware, async (req, res) => {
     // Actually, `executeModule` is async. If we run parallel, they might all pick the SAME key at the start, and all fail together.
     // To implement robust rotation, improved logic would be needed. For now, let's keep the parallel structure but be aware.
 
+    // 2. Parallel Generation (Tool, Guide, Content)
+    // We run EVERYTHING in valid parallel requests to maximize key usage and speed.
+
+    // Branch A: Tool & Guide
     const branchA = createTool ? async () => {
       const toolMsg = [{ role: 'system', content: 'Create a responsive HTML/JS calculator tool in a single block.' }, { role: 'user', content: `Tool for: ${sanitizedMainKeyword}` }];
-      const tool = await executeModule('ToolGen', toolMsg, MODEL_FALLBACKS[1]); // Use coding model
-
       const guideMsg = [{ role: 'system', content: 'Write a user guide for the tool.' }, { role: 'user', content: `Keyword: ${sanitizedMainKeyword}` }];
-      const guide = await executeModule('GuideGen', guideMsg, MODEL_FALLBACKS[0]);
+
+      // Execute both in parallel
+      const [tool, guide] = await Promise.all([
+        executeModule('ToolGen', toolMsg, MODEL_FALLBACKS[1]),
+        executeModule('GuideGen', guideMsg, MODEL_FALLBACKS[0])
+      ]);
+
       return { tool, guide };
     } : async () => ({ tool: '', guide: '' });
 
+    // Branch B: Article Content
     const branchB = async () => {
       const s1Msg = [{ role: 'system', content: 'Write article section 1 HTML.' }, { role: 'user', content: `Headings: ${metaData.headings.section_1.join(', ')}` }];
-      const s1 = await executeModule('Section1', s1Msg, MODEL_FALLBACKS[0]);
-
       const s2Msg = [{ role: 'system', content: 'Write article section 2 HTML.' }, { role: 'user', content: `Headings: ${metaData.headings.section_2.join(', ')}` }];
-      const s2 = await executeModule('Section2', s2Msg, MODEL_FALLBACKS[0]);
-
       const faqMsg = [{ role: 'system', content: 'Write FAQ HTML.' }, { role: 'user', content: `Keywords: ${sanitizedMainKeyword}` }];
-      const faq = await executeModule('FAQ', faqMsg, MODEL_FALLBACKS[0]);
+
+      // Execute all three in parallel
+      const [s1, s2, faq] = await Promise.all([
+        executeModule('Section1', s1Msg, MODEL_FALLBACKS[0]),
+        executeModule('Section2', s2Msg, MODEL_FALLBACKS[0]),
+        executeModule('FAQ', faqMsg, MODEL_FALLBACKS[0])
+      ]);
 
       return { s1, s2, faq };
     };
 
+    // Execute both branches in parallel
     const [resA, resB] = await Promise.all([branchA(), branchB()]);
 
     // 3. Images (if requested)
