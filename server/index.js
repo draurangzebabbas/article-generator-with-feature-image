@@ -1,3 +1,4 @@
+//Removed Models
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -54,10 +55,11 @@ const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // Model fallback system
 const MODEL_FALLBACKS = [
-  "mistralai/devstral-2512:free",
-  "tngtech/deepseek-r1t2-chimera:free",
-  "nvidia/nemotron-nano-12b-v2-vl:free",
   "nex-agi/deepseek-v3.1-nex-n1:free",
+  "mistralai/devstral-2512:free",
+  "nvidia/nemotron-nano-12b-v2-vl:free",
+  "qwen/qwen3-235b-a22b:free",
+  "qwen/qwen3-coder:free",
   "z-ai/glm-4.5-air:free",
   "xiaomi/mimo-v2-flash:free",
   "tngtech/tng-r1t-chimera:free",
@@ -68,8 +70,6 @@ const MODEL_FALLBACKS = [
   "openai/gpt-oss-20b:free",
   "allenai/olmo-3-32b-think:free",
   "meta-llama/llama-3.3-70b-instruct:free",
-  "qwen/qwen3-235b-a22b:free",
-  "qwen/qwen3-coder:free",
   "kwaipilot/kat-coder-pro:free",
   "google/gemini-2.0-flash-exp:free"
 ];
