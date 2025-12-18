@@ -1,4 +1,3 @@
-//Provider return error handled
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -55,10 +54,24 @@ const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // Model fallback system
 const MODEL_FALLBACKS = [
-  'tngtech/deepseek-r1t-chimera:free',
-  'qwen/qwen3-coder:free',
-  'openai/gpt-oss-20b:free',
-  'deepseek/deepseek-r1-0528:free'
+  "mistralai/devstral-2512:free",
+  "tngtech/deepseek-r1t2-chimera:free",
+  "nvidia/nemotron-nano-12b-v2-vl:free",
+  "nex-agi/deepseek-v3.1-nex-n1:free",
+  "z-ai/glm-4.5-air:free",
+  "xiaomi/mimo-v2-flash:free",
+  "tngtech/tng-r1t-chimera:free",
+  "tngtech/deepseek-r1t-chimera:free",
+  "deepseek/deepseek-r1-0528:free",
+  "google/gemma-3-27b-it:free",
+  "nvidia/nemotron-3-nano-30b-a3b:free",
+  "openai/gpt-oss-20b:free",
+  "allenai/olmo-3-32b-think:free",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "qwen/qwen3-235b-a22b:free",
+  "qwen/qwen3-coder:free",
+  "kwaipilot/kat-coder-pro:free",
+  "google/gemini-2.0-flash-exp:free"
 ];
 
 // Helper: Call OpenRouter API
@@ -311,62 +324,93 @@ app.post('/api/generate-article', authMiddleware, async (req, res) => {
 
     // Execute Module with Robust Model & Key Rotation
     const executeModule = async (moduleName, messages, initialModel, options = {}) => {
-      // Prepare list of models to try: [preferred, ...others] (unique)
+      // Prepare list of models to try: [initialModel, ...fallbacks] (unique)
       const modelsToTry = [initialModel, ...MODEL_FALLBACKS.filter(m => m !== initialModel)];
       let lastError;
 
       // OUTER LOOP: Models
       for (const model of modelsToTry) {
 
-        // INNER LOOP: Keys (Retry up to 5 times per model or until keys run out)
+        // INNER LOOP: Attempts on this model
+        // We assume multiple keys are available. We try up to 3 keys per model if valid.
+        // If we hit a "Model Error", we break immediately.
         let retriesOnModel = 0;
-        const maxRetriesOnModel = 5;
+        const maxRetriesOnModel = 3;
 
         while (retriesOnModel < maxRetriesOnModel) {
           let currentKeyObj;
           try {
             currentKeyObj = keyManager.getKey();
           } catch (e) {
-            // No keys left at all? Stop everything.
-            throw e;
+            throw e; // No keys left
           }
 
           try {
             console.log(`🚀 Executing ${moduleName} using Model: ${model} | Key: ...${currentKeyObj.key.slice(-4)}`);
-            const result = await callOpenRouterAPI(messages, model, currentKeyObj.key, 0, options);
-            return result; // Success!
+            // Internal Loop for 5xx Retries (Backoff)
+            let serverRetries = 0;
+            while (serverRetries < 2) {
+              try {
+                const result = await callOpenRouterAPI(messages, model, currentKeyObj.key, 0, options);
+                return result;
+              } catch (err) {
+                if (err.message.includes('500') || err.message.includes('502') || err.message.includes('503') || err.message.includes('504')) {
+                  console.warn(`Server error ${err.message}. Retrying same key/model...`);
+                  await new Promise(r => setTimeout(r, 2000)); // Backoff
+                  serverRetries++;
+                  continue;
+                }
+                throw err; // Throw non-5xx to outer catch
+              }
+            }
+            // If 5xx persists after local retries, throw it to handle as generic failure (or rotate key)
+            throw new Error('Persistent Server Error');
+
           } catch (error) {
             lastError = error;
             const errMsg = error.message || '';
+            const errData = JSON.stringify(error); // rough check
 
-            // Case 1: STRICT "No endpoints found" -> ABORT THIS MODEL
-            if (errMsg.includes('No endpoints found')) {
-              console.warn(`⚠️ Model ${model} returned "No endpoints found". Switching to next model...`);
-              break; // Break inner loop, go to next model in outer loop
-            }
+            // --- CLASSIFY ERROR ---
 
-            // Case 2: Upstream Model Rate Limit (Provider overloaded) -> ABORT THIS MODEL
-            // This means the MODEL is busy, swapping keys wont help.
-            if (errMsg.includes('rate-limited upstream') || errMsg.includes('Provider returned error')) {
-              console.warn(`⚠️ Model ${model} is rate-limited upstream. Switching to next model...`);
-              break; // Break inner loop, go to next model in outer loop
-            }
+            // 1. KEY PROBLEM -> Rotate Key
+            // 401, 402, 429 (without upstream/provider text)
+            const isKeyProblem =
+              errMsg.includes('401') ||
+              errMsg.includes('402') ||
+              errMsg.includes('Insufficient credits') ||
+              errMsg.includes('Invalid API key') ||
+              (errMsg.includes('429') && !errMsg.includes('upstream') && !errMsg.includes('Provider') && !errMsg.includes('Chutes'));
 
-            // Case 3: Key/Account Rate Limit -> MARK KEY FAILED, RETRY SAME MODEL
-            if (errMsg.includes('Rate limited') || errMsg.includes('Insufficient credits') || errMsg.includes('Invalid API key')) {
+            if (isKeyProblem) {
+              console.warn(`⚠️ Key ...${currentKeyObj.key.slice(-4)} failed: ${errMsg}. Rotating key.`);
               keyManager.markFailed(currentKeyObj.key, errMsg);
               retriesOnModel++;
-              continue; // Try next key
+              continue; // Next attempt (different key)
             }
 
-            // Case 3: Other errors -> RETRY (e.g. timeout, generic 500, or other 404s)
+            // 2. MODEL PROBLEM -> Rotate Model
+            // 429 + upstream/provider, or explicit provider error
+            const isModelProblem =
+              errMsg.includes('rate-limited upstream') ||
+              errMsg.includes('Provider returned error') ||
+              errMsg.includes('No endpoints found') ||
+              errMsg.includes('Chutes') ||
+              errMsg.includes('Together');
+
+            if (isModelProblem) {
+              console.warn(`⚠️ Model ${model} failed (Model Issue): ${errMsg}. Switching Model.`);
+              break; // BREAK inner loop -> Next Model
+            }
+
+            // 3. OTHER / UNKNOWN -> Default retry (rotate key to be safe)
+            console.warn(`⚠️ Unknown error with ${model}: ${errMsg}. Retrying...`);
             retriesOnModel++;
             continue;
           }
         }
       }
 
-      // If we exhausted all models and all retries
       throw new Error(`ExecuteModule failed after trying all models. Last error: ${lastError?.message}`);
     };
 
