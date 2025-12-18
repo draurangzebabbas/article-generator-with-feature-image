@@ -1,4 +1,4 @@
-//Supabase removed all keys passes in input json
+//Supabase removed all keys passes in input json and round robin
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -278,16 +278,29 @@ app.post('/api/generate-article', authMiddleware, async (req, res) => {
     // Key Manager Logic
     const keyManager = {
       keys: apiKeys.map(k => ({ key: k, status: 'active' })),
+      currentIndex: 0,
       getKey: function () {
-        // Find first active key
-        const active = this.keys.find(k => k.status === 'active');
-        if (!active) throw new Error('All provided API keys are rate limited or failed.');
-        return active;
+        // Check if any active keys remain
+        const activeCount = this.keys.filter(k => k.status === 'active').length;
+        if (activeCount === 0) throw new Error('All provided API keys are rate limited or failed.');
+
+        // Round-Robin Rotation: Find next active key
+        let attempts = 0;
+        while (attempts < this.keys.length) {
+          const k = this.keys[this.currentIndex % this.keys.length];
+          this.currentIndex++; // Move index for next call
+
+          if (k.status === 'active') {
+            return k;
+          }
+          attempts++;
+        }
+        throw new Error('All keys failed during selection.');
       },
       markFailed: function (keyStr, reason) {
         const k = this.keys.find(x => x.key === keyStr);
-        if (k) {
-          console.log(`⚠️ Key ${keyStr.substr(0, 10)}... marked as failed: ${reason}`);
+        if (k && k.status === 'active') {
+          console.log(`⚠️ Key ...${keyStr.slice(-4)} marked as failed: ${reason}`);
           k.status = 'failed';
         }
       }
