@@ -55,8 +55,8 @@ const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // Model fallback system
 const MODEL_FALLBACKS = [
+  "deepseek/deepseek-r1-0528:free",
   "nex-agi/deepseek-v3.1-nex-n1:free",
-  "mistralai/devstral-2512:free",
   "nvidia/nemotron-nano-12b-v2-vl:free",
   "qwen/qwen3-235b-a22b:free",
   "qwen/qwen3-coder:free",
@@ -64,7 +64,6 @@ const MODEL_FALLBACKS = [
   "xiaomi/mimo-v2-flash:free",
   "tngtech/tng-r1t-chimera:free",
   "tngtech/deepseek-r1t-chimera:free",
-  "deepseek/deepseek-r1-0528:free",
   "google/gemma-3-27b-it:free",
   "nvidia/nemotron-3-nano-30b-a3b:free",
   "openai/gpt-oss-20b:free",
