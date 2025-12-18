@@ -1,4 +1,4 @@
-//No endpoints found handling and more fallback models added
+//Provider return error handled
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -345,7 +345,14 @@ app.post('/api/generate-article', authMiddleware, async (req, res) => {
               break; // Break inner loop, go to next model in outer loop
             }
 
-            // Case 2: Auth/Rate Limit -> MARK KEY FAILED, RETRY SAME MODEL
+            // Case 2: Upstream Model Rate Limit (Provider overloaded) -> ABORT THIS MODEL
+            // This means the MODEL is busy, swapping keys wont help.
+            if (errMsg.includes('rate-limited upstream') || errMsg.includes('Provider returned error')) {
+              console.warn(`⚠️ Model ${model} is rate-limited upstream. Switching to next model...`);
+              break; // Break inner loop, go to next model in outer loop
+            }
+
+            // Case 3: Key/Account Rate Limit -> MARK KEY FAILED, RETRY SAME MODEL
             if (errMsg.includes('Rate limited') || errMsg.includes('Insufficient credits') || errMsg.includes('Invalid API key')) {
               keyManager.markFailed(currentKeyObj.key, errMsg);
               retriesOnModel++;
