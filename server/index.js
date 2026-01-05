@@ -55,6 +55,9 @@ const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || 'Article Generator';
 
 // Model fallback system
 const MODEL_FALLBACKS = [
+  "xiaomi/mimo-v2-flash:free"
+  "mistralai/devstral-2512:free"
+  "kwaipilot/kat-coder-pro:free"
   "deepseek/deepseek-r1-0528:free",
   "nex-agi/deepseek-v3.1-nex-n1:free",
   "nvidia/nemotron-nano-12b-v2-vl:free",
